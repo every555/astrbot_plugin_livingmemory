@@ -11,11 +11,7 @@ from astrbot.api.event import AstrMessageEvent
 from astrbot.api.platform import MessageType
 from astrbot.api.provider import LLMResponse
 
-from ..memory_scope import is_event_memory_allowed, resolve_memory_scope
-from ..memory_source import serialize_source_messages
 from ..utils import get_persona_id
-
-_DEFAULT_MEMORY_SCOPE = object()
 
 if TYPE_CHECKING:
     from ..base.config_manager import ConfigManager
@@ -23,6 +19,24 @@ if TYPE_CHECKING:
     from ..managers.memory_engine import MemoryEngine
     from ..processors.memory_processor import MemoryProcessor
     from .message_utils import MessageUtils
+
+
+async def await_appraisal_task(task: Any, timeout: float = 12.0) -> None:
+    """P3-1b: 等待当条消息的情感评估任务完成（旁挂 fire-and-forget 时序竞态修复）。
+
+    评估任务在 handle_memory_recall 里挂到 event._appraisal_task，由调用方
+    (handle_memory_reflection) 取出传给 _storage_task；写库前 await 它，
+    保证 add_memory 能从 _last_appraisal 拿到当条消息的评估、给原子打上
+    正确的情感标签（滞后一拍会造成语义错位：告白的 loving 标签打到下一句
+    修 bug 的记忆上）。全免疫：超时/任务异常/怪类型一律静默降级（不打标签），
+    shield 保证不取消原任务。
+    """
+    try:
+        if task is None or getattr(task, "done", lambda: True)():
+            return
+        await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+    except BaseException:
+        pass
 
 
 class MemoryReflection:
@@ -39,7 +53,6 @@ class MemoryReflection:
         storage_tasks: set[asyncio.Task],
         storage_sessions_inflight: set[str],
         storage_state_lock: asyncio.Lock,
-        consolidation_manager=None,
     ):
         """
         初始化记忆反思模块
@@ -54,7 +67,6 @@ class MemoryReflection:
             storage_tasks: 后台存储任务集合（共享状态）
             storage_sessions_inflight: 正在处理的会话集合（共享状态）
             storage_state_lock: 存储状态锁（共享状态）
-            consolidation_manager: 记忆整合管理器（用于反思触发）
         """
         self.context = context
         self.config_manager = config_manager
@@ -65,16 +77,7 @@ class MemoryReflection:
         self._storage_tasks = storage_tasks
         self._storage_sessions_inflight = storage_sessions_inflight
         self._storage_state_lock = storage_state_lock
-        self.consolidation_manager = consolidation_manager
         self._shutting_down = False
-
-    def _schedule_consolidation(self) -> None:
-        """反思触发时在后台顺带检查记忆整合（带冷却，不会频繁执行）。"""
-        if self.consolidation_manager is None or self._shutting_down:
-            return
-        task = asyncio.create_task(self.consolidation_manager.maybe_run("reflection"))
-        self._storage_tasks.add(task)
-        task.add_done_callback(self._storage_tasks.discard)
 
     async def handle_memory_reflection(
         self, event: AstrMessageEvent, resp: LLMResponse
@@ -83,10 +86,6 @@ class MemoryReflection:
         logger.debug(
             f"[DEBUG-Reflection] 进入 handle_memory_reflection，resp.role={resp.role}"
         )
-
-        if not is_event_memory_allowed(self.config_manager, event):
-            logger.debug("当前事件不在记忆白名单中，跳过记忆反思")
-            return
 
         if resp.role != "assistant":
             return
@@ -229,8 +228,6 @@ class MemoryReflection:
                     f"[{session_id}] 未总结轮数达到 {unsummarized_rounds} 轮，启动记忆反思任务"
                 )
 
-                self._schedule_consolidation()
-
                 # 计算总结范围（考虑待处理的失败总结）
                 start_index = last_summarized_index
                 end_index = total_messages
@@ -306,10 +303,7 @@ class MemoryReflection:
                                 start_index,
                                 end_index,
                                 retry_count,
-                                memory_scope=(
-                                    resolve_memory_scope(self.config_manager, event)
-                                    or session_id
-                                ),
+                                appraisal_task=getattr(event, "_appraisal_task", None),  # P3-1b
                             )
                         )
                     except Exception:
@@ -334,13 +328,10 @@ class MemoryReflection:
         start_index: int,
         end_index: int,
         retry_count: int,
-        memory_scope: str | None | object = _DEFAULT_MEMORY_SCOPE,
+        appraisal_task: Any = None,  # P3-1b: 当条消息的情感评估任务
     ):
         """后台存储任务"""
         from ..utils import OperationContext
-
-        if memory_scope is _DEFAULT_MEMORY_SCOPE:
-            memory_scope = session_id
 
         async with OperationContext("记忆存储", session_id):
             try:
@@ -401,7 +392,7 @@ class MemoryReflection:
                     atoms = self.memory_processor.classify_atoms_from_metadata(
                         metadata=metadata,
                         parent_importance=importance,
-                        session_id=memory_scope,
+                        session_id=session_id,
                         persona_id=persona_id,
                     )
 
@@ -412,7 +403,6 @@ class MemoryReflection:
                         "end_index": end_index,
                         "message_count": end_index - start_index,
                     }
-                    metadata["source_session_id"] = session_id
 
                     logger.info(
                         f"[{session_id}] 已使用LLM生成结构化记忆, "
@@ -431,27 +421,19 @@ class MemoryReflection:
                     )
                     return
 
+                # P3-1b: 写库前等待当条消息的情感评估完成，原子情感标签才能命中当条
+                # （reflection 是回复后的后台链，等待对用户零感知；超时静默降级）
+                await await_appraisal_task(appraisal_task, timeout=12.0)
+
                 # 正常流程：添加到记忆引擎
                 if self.memory_engine:
-                    source_threshold = float(
-                        self.config_manager.get(
-                            "reflection_engine.source_retention_importance_threshold",
-                            0.8,
-                        )
-                    )
-                    source_messages = (
-                        serialize_source_messages(history_messages)
-                        if importance >= source_threshold
-                        else None
-                    )
                     await self.memory_engine.add_memory(
                         content=content,
-                        session_id=memory_scope,
+                        session_id=session_id,
                         persona_id=persona_id,
                         importance=importance,
                         metadata=metadata,
                         atoms=atoms,
-                        source_messages=source_messages,
                     )
 
                     logger.info(

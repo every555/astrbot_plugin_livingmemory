@@ -196,6 +196,9 @@ def _install_astrbot_stubs() -> None:
     class Provider:
         pass
 
+    class RerankProvider:
+        pass
+
     class SQLiteDatabase:
         pass
 
@@ -349,6 +352,7 @@ def _install_astrbot_stubs() -> None:
     core_provider_provider_mod = types.ModuleType("astrbot.core.provider.provider")
     core_provider_provider_mod.EmbeddingProvider = EmbeddingProvider
     core_provider_provider_mod.Provider = Provider
+    core_provider_provider_mod.RerankProvider = RerankProvider
 
     core_sqlite_mod = types.ModuleType("astrbot.core.db.sqlite")
     core_sqlite_mod.SQLiteDatabase = SQLiteDatabase

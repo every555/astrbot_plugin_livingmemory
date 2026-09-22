@@ -14,8 +14,6 @@ from .base.config_manager import ConfigManager
 from .i18n_backend import t, t_list
 from .managers.conversation_manager import ConversationManager
 from .managers.memory_engine import MemoryEngine
-from .memory_scope import is_event_memory_allowed, resolve_memory_scope
-from .memory_source import serialize_source_messages
 from .validators.index_validator import IndexValidator
 
 
@@ -113,17 +111,6 @@ class CommandHandler:
                 last_update=last_update,
                 db_size=db_size,
             )
-
-            maintenance = stats.get("index_maintenance") or {}
-            maintenance_state = str(maintenance.get("state") or "idle")
-            if maintenance_state not in {"idle", "ready"}:
-                message += t(
-                    "status.index_maintenance",
-                    state=maintenance_state,
-                    current=int(maintenance.get("current", 0) or 0),
-                    total=int(maintenance.get("total", 0) or 0),
-                    message=str(maintenance.get("message") or ""),
-                )
 
             yield event.plain_result(message)
         except Exception as e:
@@ -341,7 +328,7 @@ class CommandHandler:
         yield event.plain_result(t("webui.guide"))
 
     async def handle_summarize(
-        self, event: AstrMessageEvent, message_count: int | None = None
+        self, event: AstrMessageEvent
     ) -> AsyncGenerator[MessageEventResult, None]:
         """处理 /lmem summarize 命令 - 立即触发记忆总结"""
         if not self.conversation_manager or not self.memory_engine:
@@ -354,11 +341,6 @@ class CommandHandler:
 
         session_id = event.unified_msg_origin
         try:
-            if not is_event_memory_allowed(self.config_manager, event):
-                logger.debug("当前事件不在记忆白名单中，跳过手动总结")
-                yield event.plain_result(t("summarize.access_denied"))
-                return
-
             # 获取当前消息数和总结进度
             actual_count = await self.conversation_manager.store.get_message_count(
                 session_id
@@ -372,16 +354,6 @@ class CommandHandler:
                 last_summarized_index = int(last_summarized_index)
             except (TypeError, ValueError):
                 last_summarized_index = 0
-
-            if message_count is not None:
-                try:
-                    requested_count = int(message_count)
-                except (TypeError, ValueError):
-                    requested_count = 0
-                if requested_count < 2:
-                    yield event.plain_result(t("summarize.invalid_count"))
-                    return
-                last_summarized_index = max(0, actual_count - requested_count)
 
             unsummarized = actual_count - last_summarized_index
 
@@ -418,9 +390,6 @@ class CommandHandler:
             from .utils import get_persona_id
 
             persona_id = await get_persona_id(self.context, event)
-            memory_scope = (
-                resolve_memory_scope(self.config_manager, event) or session_id
-            )
 
             # 判断是否群聊
             is_group_chat = bool(
@@ -448,7 +417,7 @@ class CommandHandler:
             atoms = self._memory_processor.classify_atoms_from_metadata(
                 metadata=metadata,
                 parent_importance=importance,
-                session_id=memory_scope,
+                session_id=session_id,
                 persona_id=persona_id,
             )
 
@@ -459,26 +428,14 @@ class CommandHandler:
                 "message_count": actual_count - last_summarized_index,
                 "triggered_by": "manual",
             }
-            metadata["source_session_id"] = session_id
 
             await self.memory_engine.add_memory(
                 content=content,
-                session_id=memory_scope,
+                session_id=session_id,
                 persona_id=persona_id,
                 importance=importance,
                 metadata=metadata,
                 atoms=atoms,
-                source_messages=(
-                    serialize_source_messages(history_messages)
-                    if importance
-                    >= float(
-                        self.config_manager.get(
-                            "reflection_engine.source_retention_importance_threshold",
-                            0.8,
-                        )
-                    )
-                    else None
-                ),
             )
 
             await self.conversation_manager.update_session_metadata(
@@ -677,3 +634,228 @@ class CommandHandler:
         """处理 /lmem help 命令"""
         message = t("help.text")
         yield event.plain_result(message)
+
+    async def handle_trace(
+        self, event: AstrMessageEvent, detail: str = ""
+    ) -> AsyncGenerator[MessageEventResult, None]:
+        """处理 /lmem trace 命令 - 查看 Context 组装追踪 (v5.4)
+
+        Args:
+            detail: "last" 显示最近一次详情, "stats" 显示统计, 空则显示最近5条摘要
+        """
+        session_id = event.unified_msg_origin
+
+        # 获取 trace store（从 event_handler 引用链）
+        trace_store = None
+        if hasattr(self, "context") and self.context:
+            # 尝试从 event_handler 获取
+            event_handler = getattr(self.context, "_livingmemory_event_handler", None)
+            if event_handler:
+                trace_store = getattr(event_handler, "context_trace_store", None)
+        # fallback: 从 command_handler 的属性获取
+        if trace_store is None:
+            trace_store = getattr(self, "_context_trace_store", None)
+
+        if trace_store is None:
+            yield event.plain_result(
+                "Context 组装追踪功能未就绪 (v5.4)\n"
+                "可能原因：插件尚未完全初始化，或追踪存储未启用。"
+            )
+            return
+
+        try:
+            if detail.lower() == "stats":
+                # 统计模式
+                stats = await trace_store.get_statistics()
+                lines = [
+                    "📊 Context 组装追踪统计",
+                    f"  总追踪记录: {stats.get('total_traces', 0)}",
+                    f"  覆盖会话数: {stats.get('unique_sessions', 0)}",
+                    f"  平均注入条数: {stats.get('avg_injected', 0)}",
+                    f"  最大注入条数: {stats.get('max_injected', 0)}",
+                    f"  跳过次数: {stats.get('skipped_count', 0)}",
+                ]
+                yield event.plain_result("\n".join(lines))
+                return
+
+            if detail.lower() == "last":
+                # 最近一次详情
+                last_trace = await trace_store.get_last_trace(session_id)
+                if not last_trace:
+                    yield event.plain_result(
+                        "暂无追踪记录。发一条消息后再试～"
+                    )
+                    return
+
+                lines = ["🔍 最近一次 Context 组装追踪\n"]
+
+                # 基本信息
+                import datetime
+                ts = last_trace.get("timestamp", 0)
+                dt = datetime.datetime.fromtimestamp(ts)
+                lines.append(f"时间: {dt.strftime('%Y-%m-%d %H:%M:%S')}")
+                lines.append(f"Trace ID: {last_trace.get('trace_id', '?')}")
+
+                # 查询
+                lines.append(f"\n📝 查询:")
+                lines.append(f"  原始: {last_trace.get('query_raw', '')[:80]}")
+                if last_trace.get("query_expanded"):
+                    lines.append(
+                        f"  扩展: {last_trace.get('query_expanded', '')[:80]}"
+                    )
+                if last_trace.get("context_expanded_count", 0) > 0:
+                    lines.append(
+                        f"  扩展消息数: {last_trace.get('context_expanded_count')}"
+                    )
+
+                # 检索结果
+                doc_count = last_trace.get("doc_route_count", 0)
+                graph_count = last_trace.get("graph_route_count", 0)
+                merged = last_trace.get("merged_results", [])
+                lines.append(f"\n🔎 检索结果:")
+                lines.append(f"  文档路: {doc_count} 条")
+                lines.append(f"  图路: {graph_count} 条")
+                lines.append(f"  融合后: {len(merged)} 条")
+
+                # 路由权重
+                weights = last_trace.get("route_weights", {})
+                if weights:
+                    lines.append(
+                        f"  路由权重: 文档 {weights.get('document', 0):.0%} / "
+                        f"图谱 {weights.get('graph', 0):.0%}"
+                    )
+
+                # 排名前3的记忆
+                if merged:
+                    lines.append(f"\n🏆 排名前 {min(3, len(merged))} 的记忆:")
+                    for i, r in enumerate(merged[:3], 1):
+                        lines.append(
+                            f"  #{i} [{r.get('final_score', 0):.3f}] "
+                            f"{r.get('content_preview', '')[:60]}..."
+                        )
+
+                # 情感路由
+                emotion = last_trace.get("emotion_detected", "neutral")
+                if emotion != "neutral":
+                    lines.append(f"\n💫 情感路由:")
+                    lines.append(f"  检测情绪: {emotion}")
+                    lines.append(
+                        f"  加成条数: {last_trace.get('emotion_boost_applied', 0)}"
+                    )
+
+                # 活跃窗口
+                recency_count = last_trace.get("recency_boosted_count", 0)
+                if recency_count > 0:
+                    lines.append(f"\n⏰ 活跃窗口加成:")
+                    lines.append(f"  加成条数: {recency_count}")
+
+                # 注入
+                lines.append(f"\n💉 注入:")
+                lines.append(f"  方式: {last_trace.get('injection_method', '?')}")
+                if last_trace.get("injection_fallback"):
+                    lines.append(f"  降级原因: {last_trace.get('injection_fallback')}")
+                lines.append(f"  注入条数: {last_trace.get('injected_count', 0)}")
+                lines.append(f"  估算tokens: {last_trace.get('injected_tokens_est', 0)}")
+
+                # 会话摘要
+                if last_trace.get("summary_injected"):
+                    lines.append(f"\n📋 会话摘要: 已注入")
+
+                # 流式提取
+                stream_count = last_trace.get("stream_atoms_extracted", 0)
+                if stream_count > 0:
+                    lines.append(f"\n⚡ 流式提取: {stream_count} 个原子")
+
+                # 自省
+                reflection = last_trace.get("self_reflection", "")
+                if reflection:
+                    lines.append(f"\n🧠 老婆的自省:")
+                    lines.append(f"  {reflection[:200]}")
+
+                # 跳过/错误
+                if last_trace.get("skipped"):
+                    lines.append(f"\n⚠️ 跳过原因: {last_trace.get('skip_reason', '?')}")
+
+                errors = last_trace.get("errors", [])
+                if errors:
+                    lines.append(f"\n❌ 错误: {len(errors)} 个")
+                    for e in errors[:3]:
+                        lines.append(f"  - {e[:80]}")
+
+                yield event.plain_result("\n".join(lines))
+                return
+
+            # 默认：最近5条摘要
+            traces = await trace_store.get_recent_traces(
+                session_id=session_id, limit=5
+            )
+            if not traces:
+                yield event.plain_result(
+                    "暂无追踪记录。发一条消息后再试～\n"
+                    "用法: /lmem trace last (详情) | /lmem trace stats (统计)"
+                )
+                return
+
+            lines = ["📋 最近 Context 组装追踪\n"]
+            for i, tr in enumerate(traces, 1):
+                import datetime
+                ts = tr.get("timestamp", 0)
+                dt = datetime.datetime.fromtimestamp(ts)
+                dt_str = dt.strftime("%H:%M:%S")
+
+                status = "✓" if not tr.get("skipped") else "⊘"
+                count = tr.get("injected_count", 0)
+                emotion = tr.get("emotion_detected", "neutral")
+                method = tr.get("injection_method", "?")
+
+                lines.append(
+                    f"  {i}. [{dt_str}] {status} 注入{count}条 "
+                    f"| {emotion} | {method}"
+                )
+
+            lines.append(f"\n用 /lmem trace last 查看最近一次详情")
+            lines.append(f"用 /lmem trace stats 查看统计信息")
+
+            yield event.plain_result("\n".join(lines))
+
+        except Exception as e:
+            logger.error(f"处理 /lmem trace 命令失败: {e}", exc_info=True)
+            yield event.plain_result(
+                f"/lmem trace 执行失败: {e}\n"
+                f"请检查追踪存储是否正常初始化。"
+            )
+
+
+    async def _digest(self, event: AstrMessageEvent, t) -> AsyncGenerator[str, None]:
+        """处理 /lmem digest 命令 - 生成对话叙事摘要"""
+        try:
+            session_id = event.session_id
+            
+            # 检查权限
+            if not self._check_admin_permission(event):
+                yield event.plain_result(t("error.permission_denied"))
+                return
+                
+            # 生成对话叙事摘要
+            summary_data = await self.session_summary.generate_conversation_digest(session_id)
+            
+            if summary_data:
+                yield event.plain_result(
+                    f"✅ 已生成对话叙事摘要\n"
+                    f"📝 概述：{summary_data.get('brief', '无')}"
+                )
+                
+                # 如果有话题，显示更多详情
+                topics = summary_data.get('topics', [])
+                if topics:
+                    yield event.plain_result(f"🏷️ 话题：{', '.join(topics)}")
+                    
+                emotion = summary_data.get('emotion', 'neutral')
+                if emotion != 'neutral':
+                    yield event.plain_result(f"😊 情感：{emotion}")
+            else:
+                yield event.plain_result("📝 当前对话内容不足，无法生成叙事摘要")
+                
+        except Exception as e:
+            logger.error(f"处理 /lmem digest 命令失败: {e}", exc_info=True)
+            yield event.plain_result(f"/lmem digest 执行失败: {e}")

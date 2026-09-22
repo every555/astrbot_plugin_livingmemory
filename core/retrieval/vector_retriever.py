@@ -3,13 +3,10 @@
 封装AstrBot的FaissVecDB,提供统一的检索接口
 """
 
-from __future__ import annotations
-
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-if TYPE_CHECKING:
-    from astrbot.core.db.vec_db.faiss_impl.vec_db import FaissVecDB
+from astrbot.core.db.vec_db.faiss_impl.vec_db import FaissVecDB
 
 _TRUNCATED_CONTENT_MARKER = "\n...[中间内容已截断]...\n"
 
@@ -24,50 +21,10 @@ class VectorResult:
     metadata: dict[str, Any]
 
 
-async def delete_faiss_documents_by_ids(
-    faiss_db,
-    doc_ids: list[int],
-) -> list[int] | None:
-    """Delete known FAISS document IDs with one index persistence operation.
-
-    Returns ``None`` when the installed AstrBot storage does not expose the
-    required bulk-capable primitives, allowing callers to use a compatibility
-    fallback.
-    """
-    if not doc_ids:
-        return []
-
-    embedding_storage = getattr(faiss_db, "embedding_storage", None)
-    document_storage = getattr(faiss_db, "document_storage", None)
-    embedding_delete = getattr(embedding_storage, "delete", None)
-    get_documents = getattr(document_storage, "get_documents", None)
-    delete_by_uuid = getattr(document_storage, "delete_document_by_doc_id", None)
-    if not (
-        callable(embedding_delete)
-        and callable(get_documents)
-        and callable(delete_by_uuid)
-    ):
-        return None
-
-    unique_ids = list(dict.fromkeys(int(doc_id) for doc_id in doc_ids))
-    documents = await get_documents(
-        metadata_filters={},
-        ids=unique_ids,
-        offset=0,
-        limit=len(unique_ids),
-    )
-    deletable = [doc for doc in documents if doc.get("doc_id")]
-    if not deletable:
-        return []
-
-    found_ids = [int(doc["id"]) for doc in deletable]
-    await embedding_delete(found_ids)
-    for document in deletable:
-        await delete_by_uuid(document["doc_id"])
-    return found_ids
+from .vector_store_base import VectorStoreBase
 
 
-class VectorRetriever:
+class VectorRetriever(VectorStoreBase):
     """
     向量密集检索器
 
@@ -213,7 +170,7 @@ class VectorRetriever:
 
         # 执行向量检索
         # fetch_k设置为k*2以确保过滤后有足够的结果
-        fetch_k = k * 4 if metadata_filters else k * 2
+        fetch_k = k * 2 if metadata_filters else k
 
         faiss_results = await self.faiss_db.retrieve(
             query=processed_query,
@@ -229,11 +186,6 @@ class VectorRetriever:
             # FaissVecDB返回的Result对象包含similarity和data
             # data是包含id, text, metadata的字典
             doc_data = result.data
-            metadata = doc_data.get("metadata")
-            if isinstance(metadata, dict) and str(
-                metadata.get("status") or "active"
-            ) != "active":
-                continue
             results.append(
                 VectorResult(
                     doc_id=doc_data["id"],
@@ -243,7 +195,7 @@ class VectorRetriever:
                 )
             )
 
-        return results[:k]
+        return results
 
     async def _get_uuid_from_id(self, doc_id: int) -> str | None:
         """
@@ -281,6 +233,79 @@ class VectorRetriever:
         except Exception as e:
             logger.error(f"[UUID查询] 失败 (doc_id={doc_id}): {e}")
             return None
+
+    async def count(self) -> int:
+        """协议六件套：当前文档总数（代理到FaissVecDB）"""
+        try:
+            result = await self.faiss_db.count_documents()
+            return int(result or 0)
+        except Exception:
+            return 0
+
+    async def update_document_content(self, doc_id: int, new_content: str) -> bool:
+        """
+        编辑记忆后原地重嵌入（2026-09-16 第一批升级#1，橘子批准）。
+
+        精准手术版：只重嵌向量层三小步（删旧向量→算新向量→同int_id挂回），
+        documents行/FTS/扩展列(memory_tier等)/外键全部原封不动。
+        设计取舍：曾考虑借鉴Mnemosyne的delete->re-insert模式，但那会给
+        documents表换新自增id（破坏外键+丢扩展列），故改良为"同位向量置换"。
+
+        Args:
+            doc_id: 文档整数id（documents.id）
+            new_content: 编辑后的完整新内容（文档层已由memory_edit更新）
+
+        Returns:
+            bool: 向量是否已同步为新内容
+        """
+        import numpy as np
+
+        from astrbot.api import logger
+
+        try:
+            new_content = str(new_content or "").strip()
+            if not new_content:
+                logger.warning(f"[重嵌入] 新内容为空 (doc_id={doc_id})")
+                return False
+
+            # 1. 定位三id：整数id -> uuid(doc_id列) -> faiss内部int_id
+            uuid_str = await self._get_uuid_from_id(doc_id)
+            if not uuid_str:
+                logger.warning(f"[重嵌入] 缺少UUID映射 (doc_id={doc_id})")
+                return False
+
+            result = await self.faiss_db.document_storage.get_document_by_doc_id(uuid_str)
+            if not result:
+                logger.warning(f"[重嵌入] 向量库无此文档 (doc_id={doc_id})")
+                return False
+            int_id = result["id"]
+
+            # 2a. 删旧向量（只动向量层）
+            await self.faiss_db.embedding_storage.delete([int_id])
+
+            # 2b. 算新向量（与add_document同款截断策略，防止embedding超限）
+            _MAX_CONTENT_CHARS = 4000
+            insert_content = new_content
+            if len(insert_content) > _MAX_CONTENT_CHARS:
+                insert_content = self._fit_content_for_embedding(
+                    insert_content, _MAX_CONTENT_CHARS
+                )
+            vector = await self.faiss_db.embedding_provider.get_embedding(insert_content)
+            vector = np.array(vector, dtype=np.float32)
+
+            # 2c. 同int_id挂回新向量——documents行零改动
+            await self.faiss_db.embedding_storage.insert(vector, int_id)
+
+            logger.info(
+                f"[重嵌入] doc_id={doc_id} 向量已同步新内容 ({len(new_content)}字符)"
+            )
+            return True
+
+        except Exception as e:
+            from astrbot.api import logger
+
+            logger.error(f"[重嵌入] 失败 doc_id={doc_id}: {e}", exc_info=True)
+            return False
 
     async def update_metadata(self, doc_id: int, metadata: dict[str, Any]) -> bool:
         """
@@ -382,92 +407,3 @@ class VectorRetriever:
 
             logger.error(f"[向量删除] 失败 (doc_id={doc_id}): {e}", exc_info=True)
             return False
-
-    async def delete_documents(self, doc_ids: list[int]) -> list[int]:
-        """Delete multiple vector documents with one index save when supported."""
-        deleted_ids = await delete_faiss_documents_by_ids(self.faiss_db, doc_ids)
-        if deleted_ids is None:
-            deleted_ids = []
-            for doc_id in dict.fromkeys(doc_ids):
-                if await self.delete_document(doc_id):
-                    deleted_ids.append(doc_id)
-        if len(deleted_ids) != len(set(doc_ids)):
-            missing = sorted(set(doc_ids) - set(deleted_ids))
-            raise RuntimeError(f"批量向量删除未找到文档: {missing}")
-
-        for doc_id in deleted_ids:
-            self._id_cache.pop(doc_id, None)
-        return deleted_ids
-
-    async def find_similar_pairs(
-        self,
-        doc_ids: list[int],
-        threshold: float,
-        k: int = 5,
-        batch_size: int = 1024,
-    ) -> list[tuple[int, int, float]]:
-        """在给定 doc_ids 之间批量查找相似对（供记忆整合的语义聚类使用）。
-
-        直接复用索引中已存储的向量（index.reconstruct），不重复调用 Embedding API，
-        并用 Faiss 的批量搜索在候选间找相似对，可扩展到上万条记忆。
-
-        Args:
-            doc_ids: 参与聚类的文档 id 列表。
-            threshold: 相似度阈值（余弦近似，与 retrieve 归一化一致）。
-            k: 每个向量查找的邻居数。
-            batch_size: 每次批量搜索的查询向量数（控制内存峰值）。
-
-        Returns:
-            [(a, b, similarity), ...]，其中 a < b 且 similarity >= threshold，去重。
-        """
-        from astrbot.api import logger as _logger
-        import numpy as np
-
-        unique_ids = list(dict.fromkeys(int(doc_id) for doc_id in doc_ids))
-        if len(unique_ids) < 2:
-            return []
-
-        index = self.faiss_db.embedding_storage.index
-        if index is None:
-            return []
-
-        vectors: list[np.ndarray] = []
-        valid_ids: list[int] = []
-        for doc_id in unique_ids:
-            try:
-                vectors.append(index.reconstruct(doc_id))
-                valid_ids.append(doc_id)
-            except Exception:
-                # 向量缺失（如从未写入或已删除）的文档跳过，不参与语义聚类
-                continue
-
-        if len(valid_ids) < 2:
-            return []
-
-        pairs: list[tuple[int, int, float]] = []
-        seen: set[tuple[int, int]] = set()
-        valid_id_set = set(valid_ids)
-
-        for start in range(0, len(valid_ids), batch_size):
-            chunk_ids = valid_ids[start : start + batch_size]
-            matrix = np.stack(vectors[start : start + batch_size]).astype("float32")
-            try:
-                scores, indices = index.search(matrix, k + 1)
-            except Exception as e:
-                _logger.warning(f"[VectorRetriever] 批量向量检索失败: {e}")
-                continue
-            similarities = 1.0 - scores / 2.0
-            for i, doc_id in enumerate(chunk_ids):
-                for j in range(indices.shape[1]):
-                    nb_id = int(indices[i][j])
-                    if nb_id < 0 or nb_id == doc_id or nb_id not in valid_id_set:
-                        continue
-                    sim = float(similarities[i][j])
-                    if sim < threshold:
-                        continue
-                    a, b = (doc_id, nb_id) if doc_id < nb_id else (nb_id, doc_id)
-                    if (a, b) not in seen:
-                        seen.add((a, b))
-                        pairs.append((a, b, sim))
-
-        return pairs

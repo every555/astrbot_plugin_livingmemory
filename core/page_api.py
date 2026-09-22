@@ -13,13 +13,13 @@ from typing import Any
 
 from .page_api_modules import (
     BackupHandler,
-    ConsolidationHandler,
+    GateHandler,
     GraphHandler,
     MemoryHandler,
     PageApiUtils,
-    PromptHandler,
     RecallHandler,
     StatsHandler,
+    TraceHandler,
 )
 
 PLUGIN_NAME = "astrbot_plugin_livingmemory"
@@ -40,8 +40,8 @@ class PluginPageApi:
         self.memory_handler = MemoryHandler(self.utils)
         self.recall_handler = RecallHandler(self.utils)
         self.graph_handler = GraphHandler(self.utils)
-        self.prompt_handler = PromptHandler(self.utils)
-        self.consolidation_handler = ConsolidationHandler(self.utils)
+        self.trace_handler = TraceHandler(self.utils)
+        self.gate_handler = GateHandler(self.utils)
 
         # BackupHandler 需要 data_dir，延迟初始化
         self._backup_handler = None
@@ -84,24 +84,6 @@ class PluginPageApi:
             "LivingMemory Page update memory",
         )
         register(
-            f"{PAGE_API_PREFIX}/memories/resummarize",
-            self.resummarize_memory,
-            ["POST"],
-            "LivingMemory Page resummarize memory source",
-        )
-        register(
-            f"{PAGE_API_PREFIX}/memories/export",
-            self.export_memories,
-            ["POST"],
-            "LivingMemory Page export memories",
-        )
-        register(
-            f"{PAGE_API_PREFIX}/memories/import",
-            self.import_memories,
-            ["POST"],
-            "LivingMemory Page import memories",
-        )
-        register(
             f"{PAGE_API_PREFIX}/memories/batch-delete",
             self.batch_delete_memories,
             ["POST"],
@@ -138,46 +120,64 @@ class PluginPageApi:
             "LivingMemory Page backup list",
         )
         register(
-            f"{PAGE_API_PREFIX}/prompts",
-            self.list_prompts,
+            f"{PAGE_API_PREFIX}/trace/list",
+            self.get_trace_list,
             ["GET"],
-            "LivingMemory Page prompt list",
+            "LivingMemory Page trace list",
         )
         register(
-            f"{PAGE_API_PREFIX}/prompts/detail",
-            self.get_prompt_detail,
+            f"{PAGE_API_PREFIX}/trace/detail",
+            self.get_trace_detail,
             ["GET"],
-            "LivingMemory Page prompt detail",
+            "LivingMemory Page trace detail",
         )
         register(
-            f"{PAGE_API_PREFIX}/prompts/update",
-            self.update_prompt,
+            f"{PAGE_API_PREFIX}/gate/candidates",
+            self.list_gate_candidates,
+            ["GET"],
+            "LivingMemory Page gate candidates",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/gate/stats",
+            self.get_gate_stats,
+            ["GET"],
+            "LivingMemory Page gate stats",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/gate/verdict",
+            self.gate_verdict,
             ["POST"],
-            "LivingMemory Page update prompt",
+            "LivingMemory Page gate verdict",
         )
         register(
-            f"{PAGE_API_PREFIX}/prompts/reset",
-            self.reset_prompt,
+            f"{PAGE_API_PREFIX}/gate/restore",
+            self.gate_restore,
             ["POST"],
-            "LivingMemory Page reset prompt",
+            "LivingMemory Page gate restore pending",
         )
         register(
-            f"{PAGE_API_PREFIX}/prompts/default",
-            self.get_prompt_default,
+            f"{PAGE_API_PREFIX}/gate/autonomous",
+            self.gate_autonomous_list,
             ["GET"],
-            "LivingMemory Page get prompt default content",
+            "LivingMemory Page gate autonomous archive",
         )
         register(
-            f"{PAGE_API_PREFIX}/consolidation/status",
-            self.get_consolidation_status,
-            ["GET"],
-            "LivingMemory Page consolidation status",
-        )
-        register(
-            f"{PAGE_API_PREFIX}/consolidation/run",
-            self.run_consolidation,
+            f"{PAGE_API_PREFIX}/gate/autonomous/revoke",
+            self.gate_autonomous_revoke,
             ["POST"],
-            "LivingMemory Page run consolidation",
+            "LivingMemory Page gate autonomous revoke",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/gate/export",
+            self.export_gate_labels,
+            ["GET"],
+            "LivingMemory Page gate export labels",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/gate/score",
+            self.gate_score_preview,
+            ["POST"],
+            "LivingMemory Page gate score preview",
         )
 
     # ==================== 路由处理方法 ====================
@@ -210,31 +210,6 @@ class PluginPageApi:
         if error:
             return error
         return await self.memory_handler.update_memory(ready["memory_engine"])
-
-    async def resummarize_memory(self):
-        """Regenerate one memory from its retained source messages."""
-        ready, error = await self._ensure_plugin_ready()
-        if error:
-            return error
-        return await self.memory_handler.resummarize_memory(
-            ready["memory_engine"], ready["memory_processor"]
-        )
-
-    async def export_memories(self):
-        """Export all or selected memories."""
-        ready, error = await self._ensure_plugin_ready()
-        if error:
-            return error
-        return await self.memory_handler.export_memories(ready["memory_engine"])
-
-    async def import_memories(self):
-        """Preview or import portable memory data."""
-        ready, error = await self._ensure_plugin_ready()
-        if error:
-            return error
-        return await self.memory_handler.import_memories(
-            ready["memory_engine"], ready["memory_processor"]
-        )
 
     async def batch_delete_memories(self):
         """批量删除记忆"""
@@ -275,42 +250,65 @@ class PluginPageApi:
         """列出所有版本备份及其元数据"""
         return await self.backup_handler.list_backups()
 
-    # ---- Prompt 管理路由 ----
+    async def get_trace_list(self):
+        """获取 Context 组装追踪列表"""
+        return await self.trace_handler.get_trace_list(self.plugin)
 
-    async def list_prompts(self):
-        return await self.prompt_handler.list_prompts()
+    async def get_trace_detail(self):
+        """获取单条 Trace 详情"""
+        return await self.trace_handler.get_trace_detail(self.plugin)
 
-    async def get_prompt_detail(self):
-        return await self.prompt_handler.get_prompt_detail()
+    # ==================== 安检门（Security Gate）====================
 
-    async def update_prompt(self):
-        return await self.prompt_handler.update_prompt()
+    def _gate_components(self):
+        """惰性取安检门与省察调度器（都读写 gate.db，互为同一条路）。"""
+        gate = sched = None
+        try:
+            gate = self.plugin._get_security_gate()
+        except Exception:
+            gate = None
+        try:
+            sched = self.plugin._get_reflection_scheduler()
+        except Exception:
+            sched = None
+        return gate, sched
 
-    async def reset_prompt(self):
-        return await self.prompt_handler.reset_prompt()
+    async def list_gate_candidates(self):
+        """安检门候选列表（标注台粮仓）"""
+        gate, sched = self._gate_components()
+        return await self.gate_handler.list_candidates(gate, sched)
 
-    async def get_prompt_default(self):
-        return await self.prompt_handler.get_prompt_default()
+    async def get_gate_stats(self):
+        """安检门战报（标签统计+候选池水位+毕业词）"""
+        gate, sched = self._gate_components()
+        return await self.gate_handler.stats(gate, sched)
 
-    # ---- 记忆整合路由 ----
+    async def gate_verdict(self):
+        """网页裁决：与省察调度器同一条落库路"""
+        return await self.gate_handler.verdict(self.plugin)
 
-    async def get_consolidation_status(self):
-        """获取记忆整合配置与统计"""
-        ready, error = await self._ensure_plugin_ready()
-        if error:
-            return error
-        return await self.consolidation_handler.get_status(
-            ready["memory_engine"],
-            ready["consolidation_manager"],
-            ready["config_manager"],
-        )
+    async def gate_restore(self):
+        """捞回暂存：pending → candidate 重新排队"""
+        return await self.gate_handler.restore(self.plugin)
 
-    async def run_consolidation(self):
-        """手动触发一轮记忆整合"""
-        ready, error = await self._ensure_plugin_ready()
-        if error:
-            return error
-        return await self.consolidation_handler.run(ready["consolidation_manager"])
+    async def gate_autonomous_list(self):
+        """自主存档台账（#1791）：老婆豁免登记过的原句，橘子翻案权入口"""
+        gate, sched = self._gate_components()
+        return await self.gate_handler.autonomous_list(gate, sched)
+
+    async def gate_autonomous_revoke(self):
+        """软否决第一步：撤销豁免指纹"""
+        gate, sched = self._gate_components()
+        return await self.gate_handler.autonomous_revoke(gate)
+
+    async def export_gate_labels(self):
+        """导出冷启动训练标签"""
+        return await self.gate_handler.export_labels(self.plugin)
+
+    async def gate_score_preview(self):
+        """试秤：四轴打分不入库"""
+        gate, _ = self._gate_components()
+        return await self.gate_handler.score_preview(gate)
 
     # ==================== 辅助方法 ====================
 
@@ -335,12 +333,4 @@ class PluginPageApi:
             "memory_engine": memory_engine,
             "conversation_manager": self.plugin.initializer.conversation_manager,
             "index_validator": self.plugin.initializer.index_validator,
-            "memory_processor": getattr(
-                self.plugin.initializer, "memory_processor", None
-            ),
-            "consolidation_manager": getattr(
-                self.plugin.initializer, "consolidation_manager", None
-            ),
-            "config_manager": getattr(self.plugin, "config_manager", None)
-            or getattr(self.plugin.initializer, "config_manager", None),
         }, None

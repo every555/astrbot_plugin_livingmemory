@@ -1,3 +1,4 @@
+faiss-cpu>=1.7.0
 networkx>=3.0
 jieba>=0.42.1
 pytz>=2021.3

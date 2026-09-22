@@ -1,5 +1,9 @@
 name: astrbot_plugin_livingmemory
-author: lxfight
-version: 2.6.0-beta.3
-description: 为 AstrBot 打造的、拥有完整记忆生命周期的智能长期记忆插件。(v2.0重构版）
+display_name: "记忆引擎"
+author: lxfight (base) / 春雪 (v5.x upgrades)
+version: "5.5.0"
+description: >
+  为 AstrBot 打造的、拥有完整记忆生命周期的智能长期记忆插件。
+  v5.5: 显式记忆指令(0.9置信度同步写入) + 对话叙事摘要(每10轮自动Digest) + 双索引智能降级告警。
+  v5.4: 核心记忆索引 + 图增强召回 + 决策追踪 + 注入链重排 + Context 组装显式化（AssemblyTrace）+ 会话摘要系统。
 repo: https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory

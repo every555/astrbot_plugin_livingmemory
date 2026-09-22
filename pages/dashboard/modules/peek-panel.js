@@ -28,8 +28,6 @@ export class PeekPanel {
    */
   open(isWide = false) {
     const panel = document.getElementById("peek-panel");
-    panel.removeAttribute("inert");
-    panel.setAttribute("aria-hidden", "false");
     panel.classList.add("visible");
     if (isWide) {
       panel.classList.add("wide");
@@ -49,8 +47,6 @@ export class PeekPanel {
     }
     const panel = document.getElementById("peek-panel");
     panel.classList.remove("visible", "wide");
-    panel.setAttribute("inert", "");
-    panel.setAttribute("aria-hidden", "true");
     document.getElementById("peek-overlay").classList.remove("visible");
     this.state.selectedMemory = null;
     this.state.isEditing = false;
@@ -128,12 +124,6 @@ export class PeekPanel {
     const keyFacts = detail.key_facts || [];
     const topics = detail.topics || [];
     const editHistory = detail.update_history || [];
-    const sourceMessages = Array.isArray(detail.source_messages) ? detail.source_messages : [];
-    const consolidatedFrom = Array.isArray(detail.consolidated_from)
-      ? detail.consolidated_from
-      : (detail.metadata && Array.isArray(detail.metadata.consolidated_from))
-        ? detail.metadata.consolidated_from
-        : [];
     const graphCtx = detail.graph_context;
 
     document.getElementById("peek-badge").innerHTML = "";
@@ -150,27 +140,13 @@ export class PeekPanel {
 
     // 操作按钮
     html += '<div class="memory-detail-actions">';
-    html += '<button class="btn btn-sm btn-secondary" id="peek-edit-btn"><i data-lucide="square-pen" aria-hidden="true"></i><span>' + window.t("detail.editBtn") + '</span></button>';
-    if (sourceMessages.length >= 2) {
-      html += '<button class="btn btn-sm btn-secondary" id="peek-resummarize-btn"><i data-lucide="refresh-cw" aria-hidden="true"></i><span>' + window.t("detail.resummarizeBtn") + '</span></button>';
-    }
-    html += '<button class="btn btn-sm btn-danger" id="peek-delete-btn"><i data-lucide="trash-2" aria-hidden="true"></i><span>' + window.t("detail.deleteBtn") + '</span></button>';
+    html += '<button class="btn btn-sm btn-secondary" id="peek-edit-btn">' + window.t("detail.editBtn") + '</button>';
+    html += '<button class="btn btn-sm btn-danger" id="peek-delete-btn">' + window.t("detail.deleteBtn") + '</button>';
     html += '</div>';
 
     // 内容区域
     html += '<div class="peek-section"><div class="peek-section-title">' + window.t("detail.content") + '</div>';
     html += '<div class="memory-detail-content" id="detail-content-display">' + esc(content) + '</div></div>';
-
-    if (sourceMessages.length) {
-      html += '<div class="peek-section"><div class="peek-section-title">' + window.t("detail.sourceMessages", sourceMessages.length) + '</div><div class="edit-history-list">';
-      sourceMessages.forEach(message => {
-        const sender = message.sender_name || message.sender_id || message.role || "--";
-        const time = message.timestamp ? new Date(message.timestamp * 1000).toLocaleString() : "--";
-        html += '<div class="edit-history-item"><span class="edit-history-time">' + esc(time) + '</span>';
-        html += '<span class="edit-history-desc"><strong>' + esc(String(sender)) + '</strong> ' + esc(String(message.content || "")) + '</span></div>';
-      });
-      html += '</div></div>';
-    }
 
     // 图谱上下文小视图
     if (graphCtx && graphCtx.nodes && graphCtx.nodes.length) {
@@ -189,14 +165,6 @@ export class PeekPanel {
     html += metaItem(window.t("detail.created"), esc(created));
     html += metaItem(window.t("detail.updated"), esc(updated));
     html += '</div></div>';
-
-    // 来源记忆（整合产生）
-    if (consolidatedFrom.length) {
-      html += '<div class="peek-section"><div class="peek-section-title">' + window.t("detail.consolidatedFrom", consolidatedFrom.length) + '</div>';
-      html += '<div class="peek-fact-list">';
-      consolidatedFrom.forEach(id => { html += '<div class="peek-fact-item"># ' + esc(String(id)) + '</div>'; });
-      html += '</div></div>';
-    }
 
     // 关键事实
     if (keyFacts.length) {
@@ -223,37 +191,18 @@ export class PeekPanel {
       html += '</div></div>';
     }
 
-    const peekBody = document.getElementById("peek-body");
-    peekBody.innerHTML = html;
-    if (window.lmHydrateIcons) window.lmHydrateIcons();
-    peekBody.scrollTop = 0;
+    document.getElementById("peek-body").innerHTML = html;
 
     // 绑定按钮事件
     const editBtn = document.getElementById("peek-edit-btn");
-    const resummarizeBtn = document.getElementById("peek-resummarize-btn");
     const delBtn = document.getElementById("peek-delete-btn");
     if (editBtn) editBtn.addEventListener("click", () => this.renderEditView(detail));
-    if (resummarizeBtn) resummarizeBtn.addEventListener("click", () => this.resummarizeMemory(id));
     if (delBtn) delBtn.addEventListener("click", () => this.deleteSingleMemory(parseInt(id)));
 
     // 加载图谱小视图
     const miniCanvas = document.getElementById("peek-mini-graph");
     if (miniCanvas && graphCtx && graphCtx.nodes && graphCtx.nodes.length) {
       this.loadMiniGraph(miniCanvas, graphCtx.nodes, graphCtx.edges);
-    }
-  }
-
-  async resummarizeMemory(memoryId) {
-    try {
-      const result = await this.api.post(
-        "memories/resummarize",
-        { memory_id: Number(memoryId) },
-        { retries: 0 }
-      );
-      this.showToast(window.t("detail.resummarizeSuccess", result.new_memory_id));
-      await this.renderMemory({ memory_id: result.new_memory_id });
-    } catch (error) {
-      this.showToast(error.message || window.t("detail.resummarizeFailed"), true);
     }
   }
 
@@ -271,8 +220,6 @@ export class PeekPanel {
     const importance = normalizeImportance(detail.importance).toFixed(1);
     const type = detail.memory_type || "GENERAL";
     const status = detail.status || "active";
-    const topics = Array.isArray(detail.topics) ? detail.topics : [];
-    const keyFacts = Array.isArray(detail.key_facts) ? detail.key_facts : [];
 
     let html = "";
 
@@ -281,22 +228,14 @@ export class PeekPanel {
     html += '</div>';
 
     html += '<div class="memory-detail-actions">';
-    html += '<button class="btn btn-sm btn-primary" id="peek-save-btn"><i data-lucide="save" aria-hidden="true"></i><span>' + window.t("detail.saveBtn") + '</span></button>';
-    html += '<button class="btn btn-sm btn-ghost" id="peek-cancel-btn"><i data-lucide="x" aria-hidden="true"></i><span>' + window.t("detail.cancelBtn") + '</span></button>';
+    html += '<button class="btn btn-sm btn-primary" id="peek-save-btn">' + window.t("detail.saveBtn") + '</button>';
+    html += '<button class="btn btn-sm btn-ghost" id="peek-cancel-btn">' + window.t("detail.cancelBtn") + '</button>';
     html += '</div>';
 
     // 可编辑内容
     html += '<div class="peek-section"><div class="peek-section-title">' + window.t("detail.content") + '</div>';
     html += '<textarea id="edit-content-area" class="memory-detail-edit-area" rows="6">' + esc(content) + '</textarea>';
     html += '<p class="form-hint" style="margin-top:4px">' + window.t("detail.contentHint") + '</p>';
-    html += '</div>';
-
-    html += '<div class="peek-section"><div class="peek-section-title">' + window.t("detail.topics") + '</div>';
-    html += '<textarea id="edit-topics-area" class="memory-detail-edit-area compact" rows="3">' + esc(topics.join("\n")) + '</textarea>';
-    html += '</div>';
-
-    html += '<div class="peek-section"><div class="peek-section-title">' + window.t("detail.keyFacts") + '</div>';
-    html += '<textarea id="edit-key-facts-area" class="memory-detail-edit-area compact" rows="5">' + esc(keyFacts.join("\n")) + '</textarea>';
     html += '</div>';
 
     // 可编辑元数据
@@ -330,10 +269,7 @@ export class PeekPanel {
 
     html += '</div></div>';
 
-    const peekBody = document.getElementById("peek-body");
-    peekBody.innerHTML = html;
-    if (window.lmHydrateIcons) window.lmHydrateIcons();
-    peekBody.scrollTop = 0;
+    document.getElementById("peek-body").innerHTML = html;
 
     // 绑定滑块事件
     document.getElementById("edit-importance").addEventListener("input", function() {
@@ -353,14 +289,6 @@ export class PeekPanel {
   async saveEdit(detail) {
     let id = detail.memory_id;
     const newContent = document.getElementById("edit-content-area").value.trim();
-    const normalizeLines = (value) => Array.from(new Set(
-      String(value || "").split(/\r?\n/).map(item => item.trim()).filter(Boolean)
-    ));
-    const sameList = (left, right) => (
-      left.length === right.length && left.every((item, index) => item === right[index])
-    );
-    const newTopics = normalizeLines(document.getElementById("edit-topics-area").value);
-    const newKeyFacts = normalizeLines(document.getElementById("edit-key-facts-area").value);
     const newStatus = document.getElementById("edit-status").value;
     const newType = document.getElementById("edit-type").value.trim();
     const newImportance = parseFloat(document.getElementById("edit-importance").value);
@@ -376,63 +304,52 @@ export class PeekPanel {
         return;
       }
 
-      const oldTopics = Array.isArray(detail.topics) ? detail.topics : [];
-      const oldKeyFacts = Array.isArray(detail.key_facts) ? detail.key_facts : [];
-      const rebuildRequired = newContent !== getDetailText(detail)
-        || !sameList(newTopics, oldTopics)
-        || !sameList(newKeyFacts, oldKeyFacts);
-
-      // 内容、主题和关键事实在一次物理替换中更新，避免派生索引错位。
-      if (rebuildRequired) {
+      // 更新内容
+      if (newContent !== getDetailText(detail)) {
         const result = await this.api.post("memories/update", {
           memory_id: id,
-          field: "structured",
-          value: {
-            content: newContent,
-            topics: newTopics,
-            key_facts: newKeyFacts,
-            status: newStatus,
-            type: newType,
-            importance: newImportance
-          },
-          value_scale: "display",
+          field: "content",
+          value: newContent,
           reason: reason
         });
         if (result && result.new_memory_id) {
+          messages.push(window.t("detail.contentUpdated", result.new_memory_id));
           id = parseInt(result.new_memory_id);
         }
-        if (newContent !== getDetailText(detail)) messages.push(window.t("detail.contentUpdated", id));
-        if (!sameList(newTopics, oldTopics)) messages.push(window.t("detail.topicsUpdated"));
-        if (!sameList(newKeyFacts, oldKeyFacts)) messages.push(window.t("detail.keyFactsUpdated"));
-        if (newStatus !== detail.status) messages.push(window.t("detail.statusUpdated", statusLabel(newStatus)));
-        if (newType !== detail.memory_type) messages.push(window.t("detail.typeUpdated", newType));
-        if (Math.abs(newImportance - normalizeImportance(detail.importance)) > 0.01) {
-          messages.push(window.t("detail.importanceUpdated", newImportance.toFixed(1)));
-        }
-      } else {
-        // 不影响派生数据的字段继续原位更新。
-        if (newStatus !== detail.status) {
-          await this.api.post("memories/update", {
-            memory_id: id, field: "status", value: newStatus, reason: reason
-          });
-          messages.push(window.t("detail.statusUpdated", statusLabel(newStatus)));
-        }
-        if (newType !== detail.memory_type) {
-          await this.api.post("memories/update", {
-            memory_id: id, field: "type", value: newType, reason: reason
-          });
-          messages.push(window.t("detail.typeUpdated", newType));
-        }
-        if (Math.abs(newImportance - normalizeImportance(detail.importance)) > 0.01) {
-          await this.api.post("memories/update", {
-            memory_id: id,
-            field: "importance",
-            value: newImportance,
-            value_scale: "display",
-            reason: reason
-          });
-          messages.push(window.t("detail.importanceUpdated", newImportance.toFixed(1)));
-        }
+      }
+
+      // 更新状态
+      if (newStatus !== detail.status) {
+        await this.api.post("memories/update", {
+          memory_id: id,
+          field: "status",
+          value: newStatus,
+          reason: reason
+        });
+        messages.push(window.t("detail.statusUpdated", statusLabel(newStatus)));
+      }
+
+      // 更新类型
+      if (newType !== detail.memory_type) {
+        await this.api.post("memories/update", {
+          memory_id: id,
+          field: "type",
+          value: newType,
+          reason: reason
+        });
+        messages.push(window.t("detail.typeUpdated", newType));
+      }
+
+      // 更新重要性
+      if (Math.abs(newImportance - normalizeImportance(detail.importance)) > 0.01) {
+        await this.api.post("memories/update", {
+          memory_id: id,
+          field: "importance",
+          value: newImportance,
+          value_scale: "display",
+          reason: reason
+        });
+        messages.push(window.t("detail.importanceUpdated", newImportance.toFixed(1)));
       }
 
       this.showToast(messages.length ? messages.join("; ") : window.t("detail.noChanges"));
@@ -522,9 +439,8 @@ export class PeekPanel {
    * @param {string} message - 消息
    * @returns {Promise<boolean>} 用户是否确认
    */
-  showConfirmDialog(title, message, options = {}) {
+  showConfirmDialog(title, message) {
     return new Promise((resolve) => {
-      const destructive = options.destructive !== false;
       this._confirmResolve = resolve;
       this._prevPeekContent = document.getElementById("peek-body").innerHTML;
 
@@ -532,12 +448,11 @@ export class PeekPanel {
       html += '<div class="confirm-dialog-title">' + esc(title) + '</div>';
       html += '<div class="confirm-dialog-message">' + esc(message) + '</div>';
       html += '<div class="confirm-dialog-actions">';
-      html += '<button class="btn btn-secondary" id="confirm-cancel-btn"><i data-lucide="x" aria-hidden="true"></i><span>' + window.t("common.cancel") + '</span></button>';
-      html += '<button class="btn ' + (destructive ? 'btn-danger' : 'btn-primary') + '" id="confirm-ok-btn"><i data-lucide="' + (destructive ? 'trash-2' : 'check') + '" aria-hidden="true"></i><span>' + window.t("common.confirm") + '</span></button>';
+      html += '<button class="btn btn-secondary" id="confirm-cancel-btn">' + window.t("common.cancel") + '</button>';
+      html += '<button class="btn btn-danger" id="confirm-ok-btn">' + window.t("common.confirm") + '</button>';
       html += '</div></div>';
 
       document.getElementById("peek-body").innerHTML = html;
-      if (window.lmHydrateIcons) window.lmHydrateIcons();
 
       const okBtn = document.getElementById("confirm-ok-btn");
       const cancelBtn = document.getElementById("confirm-cancel-btn");
@@ -566,127 +481,6 @@ export class PeekPanel {
     if (this._confirmResolve) {
       this._confirmResolve(!!result);
       this._confirmResolve = null;
-    }
-  }
-
-  /**
-   * 显示批量编辑对话框
-   *
-   * 复用 peek-body 渲染表单，供 MemoryPage 批量更新
-   * importance / status / type 字段。
-   *
-   * @param {number} count - 选中记忆数量
-   * @returns {Promise<{field: string, value: any, value_scale: string}|null>}
-   *   用户点击应用时 resolve 编辑参数，取消时 resolve null
-   */
-  showBatchEditDialog(count) {
-    return new Promise((resolve) => {
-      this._batchEditResolve = resolve;
-      this._prevPeekContent = document.getElementById("peek-body").innerHTML;
-
-      let html = '<div class="confirm-dialog">';
-      html += '<div class="confirm-dialog-title">' + esc(window.t("batchEdit.title", count)) + '</div>';
-      html += '<div class="batch-edit-form">';
-      html += '<label class="batch-edit-label" for="batch-edit-field">' + esc(window.t("batchEdit.field")) + '</label>';
-      html += '<select id="batch-edit-field" class="input">';
-      html += '<option value="importance" selected>' + esc(window.t("batchEdit.importance")) + '</option>';
-      html += '<option value="status">' + esc(window.t("batchEdit.status")) + '</option>';
-      html += '<option value="type">' + esc(window.t("batchEdit.type")) + '</option>';
-      html += '</select>';
-      html += '<div id="batch-edit-value-wrap"></div>';
-      html += '</div>';
-      html += '<div class="confirm-dialog-actions">';
-      html += '<button class="btn btn-secondary" id="batch-edit-cancel-btn"><i data-lucide="x" aria-hidden="true"></i><span>' + window.t("common.cancel") + '</span></button>';
-      html += '<button class="btn btn-primary" id="batch-edit-apply-btn"><i data-lucide="check" aria-hidden="true"></i><span>' + window.t("batchEdit.apply") + '</span></button>';
-      html += '</div></div>';
-
-      document.getElementById("peek-body").innerHTML = html;
-      if (window.lmHydrateIcons) window.lmHydrateIcons();
-
-      const fieldSelect = document.getElementById("batch-edit-field");
-      if (fieldSelect) {
-        fieldSelect.addEventListener("change", () => this._renderBatchEditValueInput(fieldSelect.value));
-      }
-      this._renderBatchEditValueInput("importance");
-
-      const applyBtn = document.getElementById("batch-edit-apply-btn");
-      const cancelBtn = document.getElementById("batch-edit-cancel-btn");
-      if (applyBtn) applyBtn.addEventListener("click", () => this._submitBatchEdit());
-      if (cancelBtn) cancelBtn.addEventListener("click", () => this._closeBatchEditDialog(null));
-    });
-  }
-
-  /**
-   * 按所选字段渲染对应的值输入控件
-   * @param {string} field - importance | status | type
-   */
-  _renderBatchEditValueInput(field) {
-    const wrap = document.getElementById("batch-edit-value-wrap");
-    if (!wrap) return;
-
-    let html = '<label class="batch-edit-label" for="batch-edit-value">' + esc(window.t("batchEdit.value")) + '</label>';
-    if (field === "status") {
-      html += '<select id="batch-edit-value" class="input">';
-      for (const status of ["active", "archived", "deleted"]) {
-        html += '<option value="' + status + '">' + esc(window.t("status." + status)) + '</option>';
-      }
-      html += '</select>';
-    } else if (field === "importance") {
-      html += '<input type="number" id="batch-edit-value" class="input" min="0" max="10" step="0.1" placeholder="0-10" />';
-    } else {
-      html += '<input type="text" id="batch-edit-value" class="input" placeholder="' + esc(window.t("batchEdit.typePlaceholder")) + '" />';
-    }
-    wrap.innerHTML = html;
-  }
-
-  /**
-   * 收集并校验批量编辑输入，成功则关闭对话框并返回编辑参数
-   */
-  _submitBatchEdit() {
-    const fieldSelect = document.getElementById("batch-edit-field");
-    const valueEl = document.getElementById("batch-edit-value");
-    const field = fieldSelect ? fieldSelect.value : "importance";
-    const rawValue = valueEl ? String(valueEl.value).trim() : "";
-
-    if (!rawValue) {
-      this.showToast(window.t("batchEdit.valueRequired"), true);
-      return;
-    }
-
-    let value = rawValue;
-    let value_scale = "auto";
-    if (field === "importance") {
-      const parsed = Number(rawValue);
-      if (!Number.isFinite(parsed) || parsed < 0 || parsed > 10) {
-        this.showToast(window.t("batchEdit.importanceRange"), true);
-        return;
-      }
-      value = parsed;
-      value_scale = "display";
-    }
-
-    this._closeBatchEditDialog({ field, value, value_scale });
-  }
-
-  /**
-   * 关闭批量编辑对话框并恢复原 peek 内容
-   * @param {{field: string, value: any, value_scale: string}|null} result
-   */
-  _closeBatchEditDialog(result) {
-    const peekBody = document.getElementById("peek-body");
-
-    if (this._prevPeekContent && peekBody) {
-      peekBody.innerHTML = this._prevPeekContent;
-      // 重新绑定详情视图按钮
-      if (this.state._detailCache && !this.state.isEditing) {
-        this.renderDetailView(this.state._detailCache);
-      }
-    }
-    this._prevPeekContent = null;
-
-    if (this._batchEditResolve) {
-      this._batchEditResolve(result);
-      this._batchEditResolve = null;
     }
   }
 

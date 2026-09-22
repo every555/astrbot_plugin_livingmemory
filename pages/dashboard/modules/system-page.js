@@ -49,9 +49,6 @@ export class SystemPage {
 
     // 更新备份列表 - 需要单独获取
     this.fetchAndRenderBackups();
-
-    // 更新记忆整合状态 - 需要单独获取
-    this.fetchConsolidation();
   }
 
   /**
@@ -134,6 +131,26 @@ export class SystemPage {
   }
 
   /**
+   * 渲染柱状图项
+   * @param {string} label - 标签
+   * @param {number} value - 数值
+   * @param {number} total - 总数
+   * @param {string} className - CSS 类名
+   * @returns {string} HTML 字符串
+   */
+  renderBarChartItem(label, value, total, className = "") {
+    const percentage = ((value / total) * 100).toFixed(1);
+    let html = '<div class="bar-chart-item">';
+    html += '<div class="bar-chart-label">' + esc(label) + '</div>';
+    html += '<div class="bar-chart-bar">';
+    html += '<div class="bar-chart-fill ' + className + '" style="width:' + percentage + '%"></div>';
+    html += '</div>';
+    html += '<div class="bar-chart-value">' + value + ' (' + percentage + '%)</div>';
+    html += '</div>';
+    return html;
+  }
+
+  /**
    * 渲染活跃会话列表
    * @param {Array} sessions - 会话列表
    */
@@ -199,6 +216,18 @@ export class SystemPage {
   }
 
   /**
+   * 格式化文件大小
+   * @param {number} bytes - 字节数
+   * @returns {string} 格式化后的字符串
+   */
+  formatFileSize(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+  }
+
+  /**
    * 获取并渲染备份列表
    */
   async fetchAndRenderBackups() {
@@ -212,97 +241,6 @@ export class SystemPage {
         listEl.innerHTML = '<div class="backup-empty">' + window.t("common.unavailable") + '</div>';
       }
     }
-  }
-
-  /**
-   * 获取并渲染记忆整合状态
-   */
-  async fetchConsolidation() {
-    try {
-      const data = await this.api.get("consolidation/status");
-      this.renderConsolidation(data);
-    } catch (e) {
-      const metaEl = document.getElementById("consolidation-meta");
-      if (metaEl) metaEl.innerHTML = '<div class="session-empty">' + window.t("common.unavailable") + '</div>';
-    }
-  }
-
-  /**
-   * 渲染记忆整合面板
-   * @param {Object} data - {config, consolidated_count, archived_count}
-   */
-  renderConsolidation(data) {
-    const config = data.config || {};
-    const metaEl = document.getElementById("consolidation-meta");
-    if (metaEl) {
-      const enabled = config.enabled ? window.t("common.enabled") : window.t("common.disabled");
-      const trigger = config.trigger === "reflection"
-        ? window.t("system.consTriggerReflection")
-        : window.t("system.consTriggerDaily");
-      const granularity = config.granularity === "semantic"
-        ? window.t("system.consGranularitySemantic")
-        : window.t("system.consGranularitySession");
-      const keep = config.keep_original === "delete"
-        ? window.t("system.consKeepDelete")
-        : window.t("system.consKeepArchive");
-      metaEl.innerHTML =
-        '<div class="session-item-meta">' +
-        window.t("system.consStatus") + ': ' + esc(enabled) +
-        ' · ' + window.t("system.consTrigger") + ': ' + esc(trigger) +
-        ' · ' + window.t("system.consGranularity") + ': ' + esc(granularity) +
-        ' · ' + window.t("system.consKeep") + ': ' + esc(keep) +
-        '</div>';
-    }
-
-    const consolidatedEl = document.getElementById("cons-consolidated");
-    if (consolidatedEl) consolidatedEl.textContent = data.consolidated_count || 0;
-    const archivedEl = document.getElementById("cons-archived");
-    if (archivedEl) archivedEl.textContent = data.archived_count || 0;
-  }
-
-  /**
-   * 手动触发一轮记忆整合
-   */
-  async runConsolidation() {
-    const button = document.getElementById("cons-run-btn");
-    const resultEl = document.getElementById("cons-run-result");
-    if (button) button.disabled = true;
-    if (resultEl) resultEl.textContent = window.t("system.consRunning");
-    try {
-      const result = await this.api.post("consolidation/run", {}, { retries: 0 });
-      if (result.skipped) {
-        this.showToast(window.t("system.consSkipped"), false);
-        if (resultEl) resultEl.textContent = window.t("system.consSkipped");
-      } else if (result.error) {
-        this.showToast(result.error, true);
-        if (resultEl) resultEl.textContent = "";
-      } else {
-        const msg = window.t(
-          "system.consResult",
-          result.groups || 0,
-          result.merged || 0,
-          result.archived || 0,
-          result.deleted || 0,
-          result.failed || 0
-        );
-        this.showToast(msg, (result.failed || 0) > 0);
-        if (resultEl) resultEl.textContent = msg;
-      }
-      await this.fetchConsolidation();
-    } catch (e) {
-      this.showToast(e.message || window.t("misc.requestFailed"), true);
-      if (resultEl) resultEl.textContent = "";
-    } finally {
-      if (button) button.disabled = false;
-    }
-  }
-
-  /**
-   * 初始化事件监听
-   */
-  initEventListeners() {
-    const runBtn = document.getElementById("cons-run-btn");
-    if (runBtn) runBtn.addEventListener("click", () => this.runConsolidation());
   }
 
   /**

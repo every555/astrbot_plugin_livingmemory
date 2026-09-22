@@ -75,7 +75,11 @@ class AtomLifecycleManager:
         result["forgotten"] = forgotten
 
         # 3. Physically purge much older forgotten atoms to cap long-term storage.
-        purged = await self.atom_store.cleanup_forgotten(self._purge_delay_days)
+        # 家规(2026-09-07 橘子)：不管记忆有多久都不能物理删除。atom_purge_enabled 默认 False，
+        # forgotten 原子永久保留在库（已移出FTS不影响日常检索）；确需腾库容时橘子亲自开开关。
+        purged = 0
+        if bool(self.config.get("atom_purge_enabled", False)):
+            purged = await self.atom_store.cleanup_forgotten(self._purge_delay_days)
         result["purged"] = purged
 
         return result

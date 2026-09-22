@@ -6,8 +6,6 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from .vector_retriever import delete_faiss_documents_by_ids
-
 
 @dataclass(slots=True)
 class GraphVectorResult:
@@ -21,8 +19,6 @@ class GraphVectorResult:
 
 class GraphVectorRetriever:
     """Wrap a vector store dedicated to graph-memory entries."""
-
-    _MAX_MEMORY_VECTOR_CHARS = 4000
 
     def __init__(self, faiss_db, config: dict[str, Any] | None = None):
         self.faiss_db = faiss_db
@@ -42,85 +38,6 @@ class GraphVectorRetriever:
     async def add_entry(self, content: str, metadata: dict[str, Any]) -> int:
         """Insert one graph entry into the vector database."""
         return await self.faiss_db.insert(content=content, metadata=metadata)
-
-    async def add_entries(self, entries: list[tuple[str, dict[str, Any]]]) -> list[int]:
-        """Insert one source memory as one aggregated graph vector."""
-        if not entries:
-            return []
-
-        return [await self.add_memory_entries(entries)]
-
-    @classmethod
-    def _aggregate_memory_entries(
-        cls,
-        entries: list[tuple[str, dict[str, Any]]],
-    ) -> tuple[str, dict[str, Any]]:
-        """Build one bounded vector document from a memory's graph entries."""
-        if not entries:
-            raise ValueError("graph entries cannot be empty")
-
-        unique_contents = list(
-            dict.fromkeys(content.strip() for content, _ in entries if content.strip())
-        )
-        if not unique_contents:
-            raise ValueError("graph entries contain no searchable content")
-
-        content = "\n".join(unique_contents)
-        if len(content) > cls._MAX_MEMORY_VECTOR_CHARS:
-            content = content[: cls._MAX_MEMORY_VECTOR_CHARS]
-
-        metadata = dict(entries[0][1])
-        metadata.update(
-            {
-                "graph_vector_granularity": "memory",
-                "graph_entry_count": len(entries),
-            }
-        )
-        return content, metadata
-
-    async def add_memory_entries(
-        self,
-        entries: list[tuple[str, dict[str, Any]]],
-    ) -> int:
-        """Insert one source memory's aggregated graph vector."""
-        ids = await self.add_memory_entries_batch([entries])
-        if len(ids) != 1:
-            raise RuntimeError(f"expected one graph vector id, got {len(ids)}")
-        return ids[0]
-
-    async def add_memory_entries_batch(
-        self,
-        memories: list[list[tuple[str, dict[str, Any]]]],
-    ) -> list[int]:
-        """Insert many source memories with one FAISS persistence operation."""
-        if not memories:
-            return []
-
-        aggregated = [self._aggregate_memory_entries(entries) for entries in memories]
-        contents = [content for content, _ in aggregated]
-        metadatas = [metadata for _, metadata in aggregated]
-
-        insert_batch = getattr(self.faiss_db, "insert_batch", None)
-        if callable(insert_batch):
-            return await insert_batch(
-                contents=contents,
-                metadatas=metadatas,
-            )
-
-        # Compatibility with older AstrBot versions without insert_batch.
-        return [
-            await self.add_entry(content, metadata)
-            for content, metadata in zip(contents, metadatas, strict=True)
-        ]
-
-    async def clear_all(self, known_vector_doc_ids: list[int]) -> None:
-        """Clear the dedicated graph-vector store with one save when supported."""
-        delete_documents = getattr(self.faiss_db, "delete_documents", None)
-        if callable(delete_documents):
-            await delete_documents(metadata_filters={})
-            return
-
-        await self.delete_entries_batch({0: known_vector_doc_ids})
 
     async def search(
         self,
@@ -183,51 +100,6 @@ class GraphVectorRetriever:
             return False
         await self.faiss_db.delete(uuid_doc_id)
         return True
-
-    async def delete_entries(
-        self,
-        source_memory_id: int,
-        vector_doc_ids: list[int],
-    ) -> None:
-        """Delete one source memory's graph vectors with one FAISS save."""
-        if not vector_doc_ids:
-            return
-
-        delete_documents = getattr(self.faiss_db, "delete_documents", None)
-        if callable(delete_documents):
-            await delete_documents(
-                metadata_filters={"source_memory_id": source_memory_id}
-            )
-            return
-
-        # Compatibility with older AstrBot versions without bulk deletion.
-        for vector_doc_id in vector_doc_ids:
-            await self.delete_entry(vector_doc_id)
-
-    async def delete_entries_batch(
-        self,
-        entries_by_source: dict[int, list[int]],
-    ) -> None:
-        """Delete several source memories with one FAISS save when supported."""
-        vector_doc_ids = [
-            vector_doc_id
-            for source_ids in entries_by_source.values()
-            for vector_doc_id in source_ids
-        ]
-        if not vector_doc_ids:
-            return
-
-        deleted_ids = await delete_faiss_documents_by_ids(
-            self.faiss_db, vector_doc_ids
-        )
-        if deleted_ids is not None:
-            if len(deleted_ids) != len(set(vector_doc_ids)):
-                missing = sorted(set(vector_doc_ids) - set(deleted_ids))
-                raise RuntimeError(f"批量图向量删除未找到文档: {missing}")
-            return
-
-        for source_memory_id, source_ids in entries_by_source.items():
-            await self.delete_entries(source_memory_id, source_ids)
 
     async def update_metadata(
         self, vector_doc_id: int, metadata: dict[str, Any]

@@ -61,7 +61,8 @@ class BM25Retriever:
         """创建新的SQLite连接并启用WAL模式和busy_timeout。"""
         db = await aiosqlite.connect(self.db_path)
         try:
-            await db.execute("PRAGMA journal_mode = WAL")
+            # 2026-08-31 修: 去掉 journal_mode=WAL——库已持久WAL,每次临时连接
+            # 再设会引发独占锁/checkpoint协调,高频召回时与写管线互撞(BUSY_SNAPSHOT)
             await db.execute("PRAGMA busy_timeout = 10000")
             yield db
         finally:
@@ -231,8 +232,6 @@ class BM25Retriever:
 
                 doc = docs[doc_id]
                 metadata = doc["metadata"]
-                if str(metadata.get("status") or "active") != "active":
-                    continue
 
                 # 应用过滤器 - 直接比较完整的 session_id / persona_id
                 if session_id is not None:

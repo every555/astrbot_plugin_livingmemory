@@ -2,7 +2,7 @@
 记忆管理处理模块
 """
 
-import inspect
+import time
 from typing import TYPE_CHECKING, Any
 
 import aiosqlite
@@ -10,14 +10,11 @@ from quart import request
 
 from astrbot.api import logger
 
-from ..memory_source import restore_source_messages
-from .memory_handler_update import MemoryHandlerUpdateMixin
-from .memory_handler_io import MemoryHandlerIoMixin
-
 if TYPE_CHECKING:
     from .utils import PageApiUtils
 
-class MemoryHandler(MemoryHandlerUpdateMixin, MemoryHandlerIoMixin):
+
+class MemoryHandler:
     """记忆管理处理器"""
 
     def __init__(self, utils: "PageApiUtils"):
@@ -54,27 +51,6 @@ class MemoryHandler(MemoryHandlerUpdateMixin, MemoryHandlerIoMixin):
             return parsed / 10.0
 
         raise ValueError("重要性必须在 0-1 或 0-10 范围内")
-
-    @staticmethod
-    def _normalize_edit_list(value: Any, field: str) -> list[str]:
-        """Validate a manually edited topics/key_facts list."""
-        if not isinstance(value, list):
-            raise ValueError(f"{field} 必须是字符串列表")
-
-        normalized: list[str] = []
-        seen: set[str] = set()
-        for item in value:
-            if not isinstance(item, str):
-                raise ValueError(f"{field} 必须是字符串列表")
-            text = item.strip()
-            if not text or text in seen:
-                continue
-            seen.add(text)
-            normalized.append(text)
-
-        if len(normalized) > 5:
-            raise ValueError(f"{field} 最多允许 5 项")
-        return normalized
 
     async def list_memories(self, memory_engine) -> dict[str, Any]:
         """
@@ -286,20 +262,11 @@ class MemoryHandler(MemoryHandlerUpdateMixin, MemoryHandlerIoMixin):
         metadata = self.utils.normalize_metadata(memory.get("metadata"))
 
         # 构建完整的详情数据
-        get_source = getattr(memory_engine, "get_memory_source", None)
-        source_result = get_source(memory_id) if callable(get_source) else []
-        source_messages = (
-            await source_result if inspect.isawaitable(source_result) else []
-        )
         detail = {
             "memory_id": memory.get("id"),
             "doc_id": memory.get("doc_id"),
             "text": memory.get("text"),
-            "summary": (
-                metadata.get("persona_summary")
-                or metadata.get("canonical_summary")
-                or memory.get("text", "")
-            ),
+            "summary": metadata.get("canonical_summary") or memory.get("text", ""),
             "created_at": memory.get("created_at"),
             "updated_at": memory.get("updated_at"),
             "metadata": metadata,
@@ -313,9 +280,6 @@ class MemoryHandler(MemoryHandlerUpdateMixin, MemoryHandlerIoMixin):
             "create_time": metadata.get("create_time"),
             "last_access_time": metadata.get("last_access_time"),
             "update_history": metadata.get("update_history", []),
-            "source_messages": source_messages,
-            "consolidated_from": metadata.get("consolidated_from", []),
-            "consolidated_at": metadata.get("consolidated_at"),
         }
 
         # 附加相关的图谱子图
@@ -340,56 +304,286 @@ class MemoryHandler(MemoryHandlerUpdateMixin, MemoryHandlerIoMixin):
 
         return self.utils.ok(detail)
 
-    async def resummarize_memory(
-        self, memory_engine, memory_processor
-    ) -> dict[str, Any]:
+    async def update_memory(self, memory_engine) -> dict[str, Any]:
+        """
+        更新单个记忆的字段
+
+        支持的字段:
+            - content: 记忆内容（会创建新记忆并删除旧记忆）
+            - importance: 重要性（0-1 或 0-10）
+            - status: 状态（active/archived/deleted）
+            - type: 类型
+
+        Payload:
+            - memory_id: 记忆ID（必需）
+            - field: 要更新的字段（必需）
+            - value: 新值（必需）
+            - reason: 更新原因（可选）
+
+        Returns:
+            包含更新结果的字典
+        """
+        from ..utils.number_utils import clamp_float
+
         payload = await request.get_json(silent=True) or {}
         try:
             memory_id = int(payload.get("memory_id"))
         except (TypeError, ValueError):
             return self.utils.error("memory_id 必须是整数")
-        if memory_processor is None:
-            return self.utils.error("记忆处理器未初始化")
+
+        field = str(payload.get("field", "")).strip()
+        value = payload.get("value")
+        value_scale = str(payload.get("value_scale", "auto")).strip().lower()
+        reason = str(payload.get("reason", "")).strip()
+
+        if not field or value is None:
+            return self.utils.error("需要指定 field 和 value")
 
         memory = await self._get_memory_record(memory_id, memory_engine)
         if not memory:
             return self.utils.error("记忆不存在")
-        get_source = getattr(memory_engine, "get_memory_source", None)
-        source_result = get_source(memory_id) if callable(get_source) else []
-        source = await source_result if inspect.isawaitable(source_result) else []
-        if len(source) < 2:
-            return self.utils.error("该记忆没有可重新总结的完整原文")
 
-        messages = restore_source_messages(source)
         current_metadata = self.utils.normalize_metadata(memory.get("metadata"))
-        is_group_chat = bool(messages[0].group_id if messages else False)
+
+        # 特殊处理：content 更新需要重新创建记忆
+        if field == "content":
+            new_content = str(value).strip()
+            if not new_content:
+                return self.utils.error("记忆内容不能为空")
+
+            session_id = current_metadata.get("session_id")
+            persona_id = current_metadata.get("persona_id")
+            importance = clamp_float(current_metadata.get("importance"), default=0.5)
+            updated_at = time.time()
+            update_history = self.utils.append_update_history(
+                current_metadata,
+                field="content",
+                old_value=memory.get("text", ""),
+                new_value=new_content,
+                reason=reason,
+                timestamp=updated_at,
+            )
+
+            if reason:
+                current_metadata["update_reason"] = reason
+            current_metadata["updated_at"] = updated_at
+            current_metadata["previous_content"] = str(memory.get("text", ""))[:100]
+            current_metadata["update_history"] = update_history
+
+            new_memory_id = None
+            try:
+                new_memory_id = await memory_engine.add_memory(
+                    content=new_content,
+                    session_id=session_id,
+                    persona_id=persona_id,
+                    importance=importance,
+                    metadata=current_metadata,
+                )
+                delete_success = await memory_engine.delete_memory(memory_id)
+                if not delete_success:
+                    await memory_engine.delete_memory(new_memory_id)
+                    return self.utils.error("旧记忆删除失败，已回滚本次内容更新")
+            except Exception as exc:
+                if new_memory_id is not None:
+                    try:
+                        await memory_engine.delete_memory(new_memory_id)
+                    except Exception:
+                        logger.error(
+                            f"[PageAPI] 回滚新记忆失败 (new_memory_id={new_memory_id})",
+                            exc_info=True,
+                        )
+                logger.error(f"[PageAPI] 更新记忆内容失败: {exc}", exc_info=True)
+                return self.utils.error(str(exc))
+
+            return self.utils.ok(
+                {
+                    "message": f"记忆内容已更新（ID: {memory_id} → {new_memory_id}）",
+                    "old_memory_id": memory_id,
+                    "new_memory_id": new_memory_id,
+                    "field": field,
+                }
+            )
+
+        # 其他字段更新
+        updates: dict[str, Any] = {}
+        old_value_for_history: Any
+        new_value_for_history: Any
+        if field == "importance":
+            try:
+                normalized = self._normalize_importance_update(value, value_scale)
+            except ValueError as exc:
+                return self.utils.error(str(exc))
+            updates["importance"] = normalized
+            old_value_for_history = self.utils.importance_to_display(
+                current_metadata.get("importance", 0.5)
+            )
+            new_value_for_history = round(normalized * 10.0, 2)
+        elif field == "status":
+            status_value = str(value).strip()
+            if status_value not in {"active", "archived", "deleted"}:
+                return self.utils.error("状态必须是 active、archived 或 deleted")
+            updates["metadata"] = {"status": status_value}
+            old_value_for_history = current_metadata.get("status", "active")
+            new_value_for_history = status_value
+        elif field == "type":
+            type_value = str(value).strip()
+            if not type_value:
+                return self.utils.error("类型不能为空")
+            updates["metadata"] = {"memory_type": type_value}
+            old_value_for_history = current_metadata.get("memory_type", "GENERAL")
+            new_value_for_history = type_value
+        else:
+            return self.utils.error(f"不支持编辑字段: {field}")
+
+        updated_at = time.time()
+        updates.setdefault("metadata", {})
+        updates["metadata"]["update_history"] = self.utils.append_update_history(
+            current_metadata,
+            field=field,
+            old_value=old_value_for_history,
+            new_value=new_value_for_history,
+            reason=reason,
+            timestamp=updated_at,
+        )
+        updates["metadata"]["updated_at"] = updated_at
+
+        if reason:
+            updates["metadata"]["update_reason"] = reason
+
         try:
-            content, metadata, importance = await memory_processor.process_conversation(
-                messages=messages,
-                is_group_chat=is_group_chat,
-                persona_id=current_metadata.get("persona_id"),
-            )
-            metadata["source_window"] = {
-                **(current_metadata.get("source_window") or {}),
-                "resummarized_from": memory_id,
-                "message_count": len(messages),
-            }
-            metadata["memory_origin"] = "source_resummarization"
-            new_memory_id = await memory_engine.replace_memory(
-                memory_id,
-                content=content,
-                importance=importance,
-                metadata={**current_metadata, **metadata},
-            )
+            success = await memory_engine.update_memory(memory_id, updates)
         except Exception as exc:
-            logger.error(f"[PageAPI] 重新总结记忆失败: {exc}", exc_info=True)
+            logger.error(f"[PageAPI] 更新记忆失败: {exc}", exc_info=True)
             return self.utils.error(str(exc))
+
+        if not success:
+            return self.utils.error("更新失败")
 
         return self.utils.ok(
             {
-                "message": "记忆已根据原文重新总结",
-                "old_memory_id": memory_id,
-                "new_memory_id": new_memory_id,
+                "message": f"记忆 {memory_id} 的 {field} 已更新",
+                "memory_id": memory_id,
+                "field": field,
+            }
+        )
+
+    async def batch_delete_memories(self, memory_engine) -> dict[str, Any]:
+        """
+        批量删除记忆
+
+        Payload:
+            - memory_ids: 记忆ID列表（必需）
+
+        Returns:
+            包含删除统计的字典
+        """
+        payload = await request.get_json(silent=True) or {}
+        memory_ids = payload.get("memory_ids", [])
+        if not isinstance(memory_ids, list) or not memory_ids:
+            return self.utils.error("需要提供记忆 ID 列表")
+
+        deleted_count = 0
+        failed_count = 0
+        failed_ids: list[Any] = []
+
+        valid_ids: list[int] = []
+        for raw_id in memory_ids:
+            try:
+                valid_ids.append(int(raw_id))
+            except Exception:
+                failed_count += 1
+                failed_ids.append(raw_id)
+
+        if valid_ids:
+            deleted_count = await memory_engine.batch_delete_memories(valid_ids)
+
+        return self.utils.ok(
+            {
+                "deleted_count": deleted_count,
+                "failed_count": failed_count,
+                "total": len(memory_ids),
+                "failed_ids": failed_ids,
+            }
+        )
+
+    async def batch_update_memories(self, memory_engine) -> dict[str, Any]:
+        """
+        批量更新记忆字段
+
+        支持的字段:
+            - status: 状态
+            - importance: 重要性
+            - type: 类型
+
+        Payload:
+            - memory_ids: 记忆ID列表（必需）
+            - field: 要更新的字段（必需）
+            - value: 新值（必需）
+
+        Returns:
+            包含更新统计的字典
+        """
+        payload = await request.get_json(silent=True) or {}
+        memory_ids = payload.get("memory_ids", [])
+        field = str(payload.get("field", "")).strip()
+        value = payload.get("value")
+        value_scale = str(payload.get("value_scale", "auto")).strip().lower()
+
+        if not isinstance(memory_ids, list) or not memory_ids:
+            return self.utils.error("需要提供记忆 ID 列表")
+        if not field or value is None:
+            return self.utils.error("需要指定 field 和 value")
+
+        if field not in ("status", "importance", "type"):
+            return self.utils.error(f"批量更新不支持字段: {field}")
+
+        updated_count = 0
+        failed_ids: list[Any] = []
+
+        for raw_id in memory_ids:
+            try:
+                memory_id = int(raw_id)
+            except (TypeError, ValueError):
+                failed_ids.append(raw_id)
+                continue
+
+            try:
+                updates: dict[str, Any] = {}
+                if field == "status":
+                    status_value = str(value).strip()
+                    if status_value not in {"active", "archived", "deleted"}:
+                        failed_ids.append(raw_id)
+                        continue
+                    updates["metadata"] = {"status": status_value}
+                elif field == "importance":
+                    try:
+                        updates["importance"] = self._normalize_importance_update(
+                            value, value_scale
+                        )
+                    except ValueError:
+                        failed_ids.append(raw_id)
+                        continue
+                elif field == "type":
+                    type_value = str(value).strip()
+                    if not type_value:
+                        failed_ids.append(raw_id)
+                        continue
+                    updates["metadata"] = {"memory_type": type_value}
+
+                success = await memory_engine.update_memory(memory_id, updates)
+                if success:
+                    updated_count += 1
+                else:
+                    failed_ids.append(raw_id)
+            except Exception:
+                failed_ids.append(raw_id)
+
+        return self.utils.ok(
+            {
+                "updated_count": updated_count,
+                "failed_count": len(failed_ids),
+                "total": len(memory_ids),
+                "failed_ids": failed_ids,
             }
         )
 

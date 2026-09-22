@@ -3,6 +3,7 @@
 """
 
 import asyncio
+import json
 import random
 import re
 from datetime import datetime
@@ -12,10 +13,11 @@ from typing import Any
 from astrbot.api import logger
 
 from ..models.conversation_models import Message
-from .memory_processor_parse import MemoryProcessorParseMixin
-from .memory_processor_build import MemoryProcessorBuildMixin
+from ..models.memory_atom import MemoryAtom
+from .atom_classifier import classify_atoms
 
-class MemoryProcessor(MemoryProcessorParseMixin, MemoryProcessorBuildMixin):
+
+class MemoryProcessor:
     """
     记忆处理器
 
@@ -86,51 +88,25 @@ class MemoryProcessor(MemoryProcessorParseMixin, MemoryProcessorBuildMixin):
         return None
 
     def _load_prompts(self) -> None:
-        """从 PromptManager 加载提示词模板（支持用户自定义覆盖）"""
-        try:
-            from ..prompts.prompt_manager import get_prompt_manager
-
-            mgr = get_prompt_manager()
-            if mgr is not None:
-                self.private_chat_prompt = mgr.get_prompt("private_chat_prompt")
-                self.group_chat_prompt = mgr.get_prompt("group_chat_prompt")
-                logger.info("[MemoryProcessor] 通过 PromptManager 加载提示词模板成功")
-            else:
-                self._load_prompts_fallback()
-        except Exception as e:
-            logger.error(f"[MemoryProcessor] 通过 PromptManager 加载提示词失败: {e}")
-            self._load_prompts_fallback()
-
-    def _get_chat_prompt(self, is_group_chat: bool) -> str:
-        """每次处理时从 PromptManager 实时读取，确保 WebUI 保存后立即生效。"""
-        try:
-            from ..prompts.prompt_manager import get_prompt_manager
-
-            mgr = get_prompt_manager()
-            if mgr is not None:
-                prompt_id = "group_chat_prompt" if is_group_chat else "private_chat_prompt"
-                return mgr.get_prompt(prompt_id)
-        except Exception:
-            pass
-        return self.group_chat_prompt if is_group_chat else self.private_chat_prompt
-
-    def _load_prompts_fallback(self) -> None:
-        """后备加载：直接从文件读取提示词"""
+        """从外部文件加载提示词模板"""
         prompt_dir = Path(__file__).parent.parent / "prompts"
 
         try:
+            # 加载私聊提示词
             private_prompt_file = prompt_dir / "private_chat_prompt.txt"
             with open(private_prompt_file, encoding="utf-8") as f:
                 self.private_chat_prompt = f.read()
 
+            # 加载群聊提示词
             group_prompt_file = prompt_dir / "group_chat_prompt.txt"
             with open(group_prompt_file, encoding="utf-8") as f:
                 self.group_chat_prompt = f.read()
 
-            logger.info("[MemoryProcessor] 提示词模板加载成功（后备模式）")
+            logger.info("[MemoryProcessor] 提示词模板加载成功")
 
         except Exception as e:
             logger.error(f"[MemoryProcessor] 加载提示词模板失败: {e}")
+            # 使用简单的后备提示词（注意：使用 replace 替换，无需转义大括号）
             self.private_chat_prompt = """分析以下对话并生成JSON格式的记忆:
 {conversation}
 
@@ -155,20 +131,12 @@ class MemoryProcessor(MemoryProcessorParseMixin, MemoryProcessorBuildMixin):
             str: 包含人格提示的 system_prompt
         """
         current_date = datetime.now().strftime("%Y-%m-%d %H:%M")
-
-        # 尝试从 PromptManager 获取基础 system prompt
-        try:
-            from ..prompts.prompt_manager import get_prompt_manager
-
-            mgr = get_prompt_manager()
-            if mgr is not None:
-                base_prompt = mgr.get_prompt("memory_system_prompt_base").replace(
-                    "{current_date}", current_date
-                )
-            else:
-                base_prompt = self._build_base_prompt_fallback(current_date)
-        except Exception:
-            base_prompt = self._build_base_prompt_fallback(current_date)
+        base_prompt = (
+            "你正在总结对话记忆。请严格按照JSON格式输出。\n"
+            f"当前日期时间: {current_date}\n"
+            "重要: 请将对话中出现的相对时间表达（如\u201c今天\u201d、\u201c明天\u201d、\u201c昨天\u201d、\u201c下周\u201d、\u201c上个月\u201d等）"
+            "转换为具体日期后再写入记忆，以便未来查阅时仍能准确理解时间信息。"
+        )
 
         if not persona_id:
             logger.debug("[MemoryProcessor] 未指定人格ID，使用基础提示词")
@@ -212,25 +180,22 @@ class MemoryProcessor(MemoryProcessorParseMixin, MemoryProcessorBuildMixin):
             )
             logger.debug(f"[MemoryProcessor] 人格提示词预览: {persona_prompt[:100]}...")
 
-            # 使用 PromptManager 模板构建增强提示词
-            try:
-                if mgr is not None:
-                    enhanced_template = mgr.get_prompt(
-                        "memory_system_prompt_with_persona"
-                    )
-                    enhanced_prompt = (
-                        enhanced_template.replace("{base_prompt}", base_prompt)
-                        .replace("{persona_prompt}", persona_prompt)
-                        .replace("{current_date}", current_date)
-                    )
-                else:
-                    enhanced_prompt = self._build_enhanced_prompt_fallback(
-                        base_prompt, persona_prompt, current_date
-                    )
-            except Exception:
-                enhanced_prompt = self._build_enhanced_prompt_fallback(
-                    base_prompt, persona_prompt, current_date
-                )
+            enhanced_prompt = (
+                f"{base_prompt}\n\n"
+                f"## 你的人格设定\n"
+                f"{persona_prompt}\n\n"
+                f"## 记忆总结要求\n"
+                f"在总结对话记忆时,你需要:\n"
+                f"1. **保持你的人格特色**: 使用符合上述人格设定的语气、用词习惯和表达方式\n"
+                f'2. **第一人称视角**: 以"我"的视角回顾对话,不要说"bot"、"助手"等第三人称\n'
+                f"3. **体现你的关注点**: 根据你的人格特点,侧重记录你会关注的信息\n"
+                f"4. **自然真实**: 让记忆读起来像是你本人在回忆这段对话,而不是机械的客观描述\n"
+                f"5. **时间转换**: 将对话中的相对时间（今天、明天、下周等）转换为具体日期（当前日期: {current_date}）\n\n"
+                f"例如:\n"
+                f'- 如果你是活泼可爱的性格,记忆中可以使用"呀"、"呢"、"~"等语气词\n'
+                f"- 如果你是专业严谨的性格,记忆应该用词准确、逻辑清晰、格式规范\n"
+                f"- 如果你是幽默风趣的性格,记忆中可以包含轻松的表达和有趣的观察"
+            )
 
             return enhanced_prompt
 
@@ -242,40 +207,6 @@ class MemoryProcessor(MemoryProcessorParseMixin, MemoryProcessorBuildMixin):
                 f"[MemoryProcessor] 获取人格提示词时发生错误: {e}", exc_info=True
             )
             return base_prompt
-
-    @staticmethod
-    def _build_base_prompt_fallback(current_date: str) -> str:
-        """后备基础 system prompt（当 PromptManager 不可用时）"""
-        return (
-            "你正在总结对话记忆。请严格按照JSON格式输出。\n"
-            f"当前日期时间: {current_date}\n"
-            "重要: 请将对话中出现的相对时间表达（如\u201c今天\u201d、"
-            "\u201c明天\u201d、\u201c昨天\u201d、"
-            "\u201c下周\u201d、\u201c上个月\u201d等）"
-            "转换为具体日期后再写入记忆，以便未来查阅时仍能准确理解时间信息。"
-        )
-
-    @staticmethod
-    def _build_enhanced_prompt_fallback(
-        base_prompt: str, persona_prompt: str, current_date: str
-    ) -> str:
-        """后备增强 system prompt（当 PromptManager 不可用时）"""
-        return (
-            f"{base_prompt}\n\n"
-            f"## 你的人格设定\n"
-            f"{persona_prompt}\n\n"
-            f"## 记忆总结要求\n"
-            f"在总结对话记忆时,你需要:\n"
-            f"1. **保持你的人格特色**: 使用符合上述人格设定的语气、用词习惯和表达方式\n"
-            f'2. **第一人称视角**: 以"我"的视角回顾对话,不要说"bot"、"助手"等第三人称\n'
-            f"3. **体现你的关注点**: 根据你的人格特点,侧重记录你会关注的信息\n"
-            f"4. **自然真实**: 让记忆读起来像是你本人在回忆这段对话,而不是机械的客观描述\n"
-            f"5. **时间转换**: 将对话中的相对时间（今天、明天、下周等）转换为具体日期（当前日期: {current_date}）\n\n"
-            f"例如:\n"
-            f'- 如果你是活泼可爱的性格,记忆中可以使用"呀"、"呢"、"~"等语气词\n'
-            f"- 如果你是专业严谨的性格,记忆应该用词准确、逻辑清晰、格式规范\n"
-            f"- 如果你是幽默风趣的性格,记忆中可以包含轻松的表达和有趣的观察"
-        )
 
     async def _call_llm_with_retry(
         self, prompt: str, system_prompt: str, max_retries: int = 3
@@ -388,12 +319,17 @@ class MemoryProcessor(MemoryProcessorParseMixin, MemoryProcessorBuildMixin):
         # 1. 格式化对话历史
         conversation_text = self._format_conversation(messages)
 
-        # 2. 选择合适的提示词模板（每次从 PromptManager 读取，确保 WebUI 保存后立即生效）
+        # 2. 选择合适的提示词模板
         # 使用 replace 而非 format，避免对话内容中的大括号导致解析错误
         current_date = datetime.now().strftime("%Y-%m-%d %H:%M")
-        prompt = self._get_chat_prompt(is_group_chat).replace(
-            "{conversation}", conversation_text
-        ).replace("{current_date}", current_date)
+        if is_group_chat:
+            prompt = self.group_chat_prompt.replace("{conversation}", conversation_text)
+        else:
+            prompt = self.private_chat_prompt.replace(
+                "{conversation}", conversation_text
+            )
+        # 注入当前日期，让 LLM 能将相对时间转换为绝对日期
+        prompt = prompt.replace("{current_date}", current_date)
 
         # 3. 调用LLM生成结构化记忆
         conversation_type = "群聊" if is_group_chat else "私聊"
@@ -440,10 +376,6 @@ class MemoryProcessor(MemoryProcessorParseMixin, MemoryProcessorBuildMixin):
             content, metadata = self._build_storage_format(
                 fallback_excerpt, structured_data, is_group_chat
             )
-            metadata["participant_identities"] = self._extract_participant_identities(
-                messages
-            )
-            content = self._apply_source_time_tags(content, metadata, messages)
             # 将质量标记写入 metadata
             metadata["summary_quality"] = structured_data.get("_quality", "normal")
 
@@ -464,33 +396,6 @@ class MemoryProcessor(MemoryProcessorParseMixin, MemoryProcessorBuildMixin):
             logger.error(f"[MemoryProcessor] 处理对话历史失败: {e}", exc_info=True)
             # 不再降级处理，直接向上抛出异常，由调用方处理重试逻辑
             raise
-
-    def _apply_source_time_tags(
-        self,
-        content: str,
-        metadata: dict[str, Any],
-        messages: list[Message],
-    ) -> str:
-        """Attach source dates without asking the LLM to infer them."""
-        if not self.config.get("include_source_time_tags", True) or not messages:
-            return content
-
-        timestamps = sorted(float(message.timestamp) for message in messages)
-        start = datetime.fromtimestamp(timestamps[0]).astimezone()
-        end = datetime.fromtimestamp(timestamps[-1]).astimezone()
-        dates = sorted(
-            {
-                datetime.fromtimestamp(value).strftime("%Y-%m-%d")
-                for value in timestamps
-            }
-        )
-        label = dates[0] if len(dates) == 1 else f"{dates[0]} - {dates[-1]}"
-
-        metadata["time_tags"] = dates
-        metadata["source_time_start"] = start.isoformat()
-        metadata["source_time_end"] = end.isoformat()
-        metadata["source_time_label"] = label
-        return content
 
     def _format_conversation(self, messages: list[Message]) -> str:
         """
@@ -526,44 +431,6 @@ class MemoryProcessor(MemoryProcessorParseMixin, MemoryProcessorBuildMixin):
         return "\n".join(formatted_lines)
 
     @staticmethod
-    def _extract_participant_identities(
-        messages: list[Message],
-    ) -> list[dict[str, Any]]:
-        """Build stable graph identities from message sender IDs, not LLM names."""
-        identities: dict[str, dict[str, Any]] = {}
-        for message in messages:
-            if message.role == "system":
-                continue
-            sender_id = str(message.sender_id or "").strip()
-            if not sender_id:
-                continue
-            platform = str(message.platform or "unknown").strip().lower() or "unknown"
-            identity_key = f"{platform}:{sender_id}"
-            display_name = str(message.sender_name or sender_id).strip() or sender_id
-            is_bot = bool(
-                message.metadata.get("is_bot_message", False)
-                or message.role == "assistant"
-            )
-
-            identity = identities.setdefault(
-                identity_key,
-                {
-                    "identity_key": identity_key,
-                    "sender_id": sender_id,
-                    "platform": platform,
-                    "display_name": display_name,
-                    "aliases": [],
-                    "is_bot": is_bot,
-                },
-            )
-            identity["display_name"] = display_name
-            identity["is_bot"] = bool(identity["is_bot"] or is_bot)
-            if display_name not in identity["aliases"]:
-                identity["aliases"].append(display_name)
-
-        return list(identities.values())
-
-    @staticmethod
     def _format_sender_info(msg: Message) -> str:
         time_str = datetime.fromtimestamp(msg.timestamp).strftime("%Y-%m-%d %H:%M:%S")
         display_name = msg.sender_name if msg.sender_name else msg.sender_id or "未知"
@@ -579,3 +446,448 @@ class MemoryProcessor(MemoryProcessorParseMixin, MemoryProcessorBuildMixin):
     @classmethod
     def _message_part_to_text(cls, part: Any) -> tuple[str, bool]:
         return Message._content_part_to_text(part)
+
+    def _parse_llm_response(
+        self, response_text: str, is_group_chat: bool
+    ) -> dict[str, Any]:
+        """
+        解析LLM响应,提取JSON数据
+
+        Args:
+            response_text: LLM响应文本
+            is_group_chat: 是否为群聊
+
+        Returns:
+            解析后的字典数据
+        """
+        logger.debug(f"[MemoryProcessor] 开始解析 LLM 响应，长度={len(response_text)}")
+
+        try:
+            # 尝试直接解析JSON
+            # 先清理可能的markdown代码块标记
+            cleaned_text = response_text.strip()
+            logger.debug(
+                f"[MemoryProcessor] 清理前的响应文本（前100字符）: {response_text[:100]}"
+            )
+
+            if cleaned_text.startswith("```json"):
+                cleaned_text = cleaned_text[7:]
+                logger.debug("[MemoryProcessor] 移除了 ```json 标记")
+            if cleaned_text.startswith("```"):
+                cleaned_text = cleaned_text[3:]
+                logger.debug("[MemoryProcessor] 移除了 ``` 标记")
+            if cleaned_text.endswith("```"):
+                cleaned_text = cleaned_text[:-3]
+                logger.debug("[MemoryProcessor] 移除了结尾 ``` 标记")
+            cleaned_text = cleaned_text.strip()
+
+            logger.debug(
+                f"[MemoryProcessor] 清理后准备解析的 JSON（前500字符）:\n{cleaned_text[:500]}"
+            )
+
+            # 解析JSON
+            data = json.loads(cleaned_text)
+
+            # 类型检查：确保解析结果是 dict
+            if not isinstance(data, dict):
+                logger.warning(
+                    f"[MemoryProcessor] JSON 解析结果不是 dict，类型为 {type(data).__name__}"
+                )
+                raise ValueError(f"期望 dict 类型，实际为 {type(data).__name__}")
+
+            logger.info("[MemoryProcessor] JSON 解析成功")
+            logger.debug(f"[MemoryProcessor] 解析得到的字段: {list(data.keys())}")
+
+            # 验证必需字段 - 简化后的字段列表
+            required_fields = [
+                "summary",
+                "topics",
+                "key_facts",
+                "sentiment",
+                "importance",
+            ]
+            if is_group_chat:
+                required_fields.append("participants")
+
+            for field in required_fields:
+                if field not in data:
+                    logger.warning(
+                        f"[MemoryProcessor] LLM 响应缺少字段: {field}, 使用默认值"
+                    )
+                    data[field] = self._get_default_value(field)
+
+            # 数据类型校验和规范化
+            data["summary"] = str(data.get("summary", ""))
+            logger.debug(f"[MemoryProcessor] 提取 summary: {data['summary'][:100]}...")
+
+            data["topics"] = self._ensure_list(data.get("topics", []))[:5]
+            logger.debug(
+                f"[MemoryProcessor] 提取 topics ({len(data['topics'])} 个): {data['topics']}"
+            )
+
+            data["key_facts"] = self._ensure_list(data.get("key_facts", []))[:5]
+            logger.debug(
+                f"[MemoryProcessor] 提取 key_facts ({len(data['key_facts'])} 个): {data['key_facts']}"
+            )
+
+            data["sentiment"] = self._validate_sentiment(
+                data.get("sentiment", "neutral")
+            )
+            logger.debug(f"[MemoryProcessor] 提取 sentiment: {data['sentiment']}")
+
+            data["importance"] = self._validate_importance(data.get("importance", 0.5))
+            logger.debug(f"[MemoryProcessor] 提取 importance: {data['importance']}")
+
+            if is_group_chat:
+                data["participants"] = self._ensure_list(data.get("participants", []))
+                logger.debug(
+                    f"[MemoryProcessor] 提取 participants ({len(data['participants'])} 个): {data['participants']}"
+                )
+
+            return data
+
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.warning(f"[MemoryProcessor]  JSON 解析失败: {e}")
+            logger.debug(
+                f"[MemoryProcessor] 解析失败的内容（前200字符）: {response_text[:200]}"
+            )
+
+            # 尝试修复 JSON 后再解析
+            logger.info("[MemoryProcessor] 尝试修复 JSON 后重新解析")
+            try:
+                fixed_text = self._try_fix_json(response_text)
+                data = json.loads(fixed_text)
+                if isinstance(data, dict):
+                    logger.info("[MemoryProcessor] JSON 修复后解析成功")
+                    return self._normalize_parsed_data(data, is_group_chat)
+            except (json.JSONDecodeError, ValueError) as fix_err:
+                logger.debug(f"[MemoryProcessor] JSON 修复后仍无法解析: {fix_err}")
+
+            logger.info("[MemoryProcessor] 尝试使用正则表达式提取 JSON")
+            # 尝试正则提取
+            return self._extract_by_regex(response_text, is_group_chat)
+        except Exception as e:
+            logger.error(
+                f"[MemoryProcessor]  解析 LLM 响应时发生异常: {e}", exc_info=True
+            )
+            logger.debug(
+                f"[MemoryProcessor] 异常发生时的响应内容: {response_text[:200]}"
+            )
+            return self._get_default_structured_data(is_group_chat)
+
+    def _extract_by_regex(self, text: str, is_group_chat: bool) -> dict[str, Any]:
+        """
+        使用正则表达式从文本中提取结构化数据(备用方案)
+
+        Args:
+            text: 响应文本
+            is_group_chat: 是否为群聊
+
+        Returns:
+            提取的结构化数据
+        """
+        logger.debug("[MemoryProcessor] 开始使用正则表达式提取结构化数据")
+        data = self._get_default_structured_data(is_group_chat)
+
+        try:
+            # 先尝试找到完整的 JSON 块
+            json_matches = re.findall(
+                r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", text, re.DOTALL
+            )
+            logger.debug(
+                f"[MemoryProcessor] 正则匹配到 {len(json_matches)} 个可能的 JSON 块"
+            )
+
+            for i, match in enumerate(json_matches):
+                logger.debug(
+                    f"[MemoryProcessor] JSON 块 #{i + 1} (前200字符): {match[:200]}..."
+                )
+                try:
+                    # 尝试解析每个匹配的块
+                    parsed = json.loads(match)
+                    if "summary" in parsed:
+                        logger.info(
+                            f"[MemoryProcessor]  成功从第 {i + 1} 个 JSON 块中解析数据"
+                        )
+                        data = parsed
+                        break
+                except json.JSONDecodeError:
+                    continue
+
+            # 如果没有找到完整的 JSON，尝试单独提取字段
+            if data == self._get_default_structured_data(is_group_chat):
+                logger.debug("[MemoryProcessor] 未找到完整 JSON，尝试提取单独字段")
+
+                # 提取summary
+                summary_match = re.search(r'"summary"\s*:\s*"([^"]+)"', text)
+                if summary_match:
+                    data["summary"] = summary_match.group(1)
+                    logger.debug(
+                        f"[MemoryProcessor] 正则提取 summary: {data['summary'][:50]}..."
+                    )
+
+                # 提取importance
+                importance_match = re.search(r'"importance"\s*:\s*([0-9.]+)', text)
+                if importance_match:
+                    data["importance"] = float(importance_match.group(1))
+                    logger.debug(
+                        f"[MemoryProcessor] 正则提取 importance: {data['importance']}"
+                    )
+
+                # 提取sentiment
+                sentiment_match = re.search(r'"sentiment"\s*:\s*"(\w+)"', text)
+                if sentiment_match:
+                    data["sentiment"] = sentiment_match.group(1)
+                    logger.debug(
+                        f"[MemoryProcessor] 正则提取 sentiment: {data['sentiment']}"
+                    )
+
+                # 提取 topics 数组
+                topics_match = re.search(r'"topics"\s*:\s*\[(.*?)\]', text, re.DOTALL)
+                if topics_match:
+                    topics_str = topics_match.group(1)
+                    topics = re.findall(r'"([^"]+)"', topics_str)
+                    data["topics"] = topics[:5]
+                    logger.debug(f"[MemoryProcessor] 正则提取 topics: {data['topics']}")
+
+                # 提取 key_facts 数组
+                facts_match = re.search(r'"key_facts"\s*:\s*\[(.*?)\]', text, re.DOTALL)
+                if facts_match:
+                    facts_str = facts_match.group(1)
+                    facts = re.findall(r'"([^"]+)"', facts_str)
+                    data["key_facts"] = facts[:5]
+                    logger.debug(
+                        f"[MemoryProcessor] 正则提取 key_facts: {data['key_facts']}"
+                    )
+
+            logger.info(
+                f"[MemoryProcessor] 正则提取完成，提取到的字段: {list(data.keys())}"
+            )
+
+        except Exception as e:
+            logger.error(f"[MemoryProcessor]  正则提取失败: {e}", exc_info=True)
+
+        return data
+
+    def _build_storage_format(
+        self,
+        fallback_excerpt: str,
+        structured_data: dict[str, Any],
+        is_group_chat: bool,
+    ) -> tuple[str, dict[str, Any]]:
+        """
+        构建存储格式
+
+        Args:
+            fallback_excerpt: 当摘要为空时使用的对话摘录
+            structured_data: 结构化数据
+            is_group_chat: 是否为群聊
+
+        Returns:
+            (content, metadata) 元组
+        """
+        summary = structured_data.get("summary", "")
+        key_facts = structured_data.get("key_facts", [])
+
+        # canonical_summary：事实导向、风格中性，用于检索
+        # 由 summary + key_facts 拼接，去除人格语气词
+        canonical_parts = [summary] if summary else []
+        if key_facts:
+            canonical_parts.append("；".join(str(f) for f in key_facts[:5]))
+        canonical_summary = " | ".join(canonical_parts) if canonical_parts else ""
+
+        # content 字段使用 canonical_summary，提升检索稳定性
+        if canonical_summary:
+            content = canonical_summary
+        else:
+            content = fallback_excerpt
+
+        # metadata字段:存储结构化信息
+        # 注意：不要在这里设置 create_time 和 last_access_time
+        # 这些字段会由 MemoryEngine.add_memory() 自动添加
+        metadata = {
+            "topics": structured_data.get("topics", []),
+            "key_facts": key_facts,
+            "sentiment": structured_data.get("sentiment", "neutral"),
+            "interaction_type": "group_chat" if is_group_chat else "private_chat",
+            # 双通道：canonical 用于检索，persona_summary 保留原始人格风格摘要
+            "canonical_summary": canonical_summary,
+            "persona_summary": summary,
+            "summary_schema_version": "v2",
+            # summary_quality 由 process_conversation 中的 SummaryValidator 覆盖写入
+        }
+
+        if is_group_chat and "participants" in structured_data:
+            metadata["participants"] = structured_data["participants"]
+
+        return content, metadata
+
+    def _normalize_parsed_data(self, data: dict, is_group_chat: bool) -> dict[str, Any]:
+        """
+        规范化解析后的数据（补充缺失字段、类型转换）
+
+        Args:
+            data: 解析后的原始字典
+            is_group_chat: 是否为群聊
+
+        Returns:
+            规范化后的字典
+        """
+        required_fields = ["summary", "topics", "key_facts", "sentiment", "importance"]
+        if is_group_chat:
+            required_fields.append("participants")
+
+        for field in required_fields:
+            if field not in data:
+                data[field] = self._get_default_value(field)
+
+        data["summary"] = str(data.get("summary", ""))
+        data["topics"] = self._ensure_list(data.get("topics", []))[:5]
+        data["key_facts"] = self._ensure_list(data.get("key_facts", []))[:5]
+        data["sentiment"] = self._validate_sentiment(data.get("sentiment", "neutral"))
+        data["importance"] = self._validate_importance(data.get("importance", 0.5))
+
+        if is_group_chat:
+            data["participants"] = self._ensure_list(data.get("participants", []))
+
+        return data
+
+    def _ensure_list(self, value: Any) -> list[str]:
+        """确保值是字符串列表"""
+        if isinstance(value, list):
+            return [str(item) for item in value if item]
+        elif isinstance(value, str):
+            return [value] if value else []
+        else:
+            return []
+
+    def _validate_sentiment(self, sentiment: str) -> str:
+        """验证情感值"""
+        valid_sentiments = ["positive", "neutral", "negative"]
+        sentiment = sentiment.lower()
+        return sentiment if sentiment in valid_sentiments else "neutral"
+
+    def _validate_importance(self, importance: Any) -> float:
+        """验证重要性评分"""
+        try:
+            score = float(importance)
+            return max(0.0, min(1.0, score))  # 限制在0-1之间
+        except (ValueError, TypeError):
+            return 0.5
+
+    def build_memory_from_structured_data(
+        self,
+        structured_data: dict[str, Any],
+        is_group_chat: bool = False,
+        fallback_excerpt: str = "",
+    ) -> tuple[str, dict[str, Any], float]:
+        """复用自动总结流程，将结构化数据转换为标准记忆存储格式。"""
+        # 与自动总结路径保持一致：先校验质量，再规范化。
+        # 这样原始 importance 越界等异常仍会被判为 low quality。
+        quality = self._validate_summary_quality(structured_data)
+        normalized = self._normalize_parsed_data(structured_data, is_group_chat)
+        normalized["_quality"] = quality
+
+        content, metadata = self._build_storage_format(
+            fallback_excerpt or normalized.get("summary", ""),
+            normalized,
+            is_group_chat,
+        )
+        metadata["summary_quality"] = quality
+        return (
+            content,
+            metadata,
+            self._validate_importance(normalized.get("importance")),
+        )
+
+    def _get_default_value(self, field: str) -> Any:
+        """获取字段的默认值"""
+        defaults = {
+            "summary": "",
+            "topics": [],
+            "key_facts": [],
+            "participants": [],
+            "sentiment": "neutral",
+            "importance": 0.5,
+        }
+        return defaults.get(field, "")
+
+    def _get_default_structured_data(self, is_group_chat: bool) -> dict[str, Any]:
+        """获取默认的结构化数据"""
+        data = {
+            "summary": "对话记录",
+            "topics": [],
+            "key_facts": [],
+            "sentiment": "neutral",
+            "importance": 0.5,
+        }
+        if is_group_chat:
+            data["participants"] = []
+        return data
+
+    def _validate_summary_quality(self, structured_data: dict[str, Any]) -> str:
+        """
+        校验总结质量，返回质量等级。
+
+        检查规则：
+        1. summary 不能为空或过短（< 10 字符）
+        2. key_facts 至少有 1 条
+        3. importance 在合法范围内
+        4. summary 不含泛化词（"某用户"、"有人"等）
+
+        Returns:
+            "normal" 或 "low"
+        """
+        summary = structured_data.get("summary", "")
+        key_facts = structured_data.get("key_facts", [])
+        importance = structured_data.get("importance", 0.5)
+
+        if not summary or len(summary.strip()) < 10:
+            return "low"
+        if not key_facts:
+            return "low"
+        if not isinstance(importance, (int, float)) or not (0.0 <= importance <= 1.0):
+            return "low"
+
+        # 泛化词检测
+        generic_terms = [
+            "某用户",
+            "有人",
+            "某人",
+            "用户说",
+            "对方说",
+            "群成员",
+            "某群成员",
+        ]
+        if any(term in summary for term in generic_terms):
+            return "low"
+
+        return "normal"
+
+    def classify_atoms_from_metadata(
+        self,
+        metadata: dict[str, Any],
+        parent_importance: float = 0.5,
+        session_id: str | None = None,
+        persona_id: str | None = None,
+    ) -> list[MemoryAtom]:
+        """Generate time-aware memory atoms from key_facts in metadata.
+
+        This is a post-processing step after process_conversation().
+        It does NOT make additional LLM calls — classification is rule-based.
+        """
+        if not self.config.get("atom_enabled", True):
+            return []
+        key_facts: list[str] = metadata.get("key_facts", [])
+        if not key_facts:
+            return []
+        topics = metadata.get("topics", [])
+        participants = metadata.get("participants", [])
+        return classify_atoms(
+            key_facts=key_facts,
+            topics=topics,
+            participants=participants,
+            parent_importance=parent_importance,
+            session_id=session_id,
+            persona_id=persona_id,
+        )

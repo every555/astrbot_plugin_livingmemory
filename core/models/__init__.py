@@ -3,6 +3,7 @@
 包含Message、Session、MemoryEvent等数据模型
 """
 
+from .assembly_trace import AssemblyTrace, RouteResultDetail
 from .conversation_models import (
     MemoryEvent,
     Message,
@@ -22,4 +23,6 @@ __all__ = [
     "GraphEdge",
     "GraphEntry",
     "ExtractedGraph",
+    "AssemblyTrace",
+    "RouteResultDetail",
 ]

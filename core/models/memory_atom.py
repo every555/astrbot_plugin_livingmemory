@@ -90,6 +90,18 @@ class MemoryAtom:
     persona_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    # v11 (P0-1 Provenance): content origin — internal (couple chat / agent)
+    # vs external (web fetch / search results / tool returns)
+    source: str = "internal"
+
+    # v9: Three-tier memory system (inspired by DeepTutor)
+    # tier=1: L1 raw event trace (auto-captured from messages)
+    # tier=2: L2 per-session summary (SessionSummaryManager)
+    # tier=3: L3 cross-session synthesis (L3Synthesizer)
+    tier: int = 2
+    source_ids: list[str] = field(default_factory=list)
+    # source_ids: L2 cites L1 message ids, L3 cites L2 atom ids
+
     # Internal id, set after insertion
     atom_id: int = 0
 

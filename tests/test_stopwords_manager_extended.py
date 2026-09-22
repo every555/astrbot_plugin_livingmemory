@@ -1,6 +1,8 @@
 """Extended tests for StopwordsManager to improve coverage."""
 
+import asyncio
 from pathlib import Path
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from astrbot_plugin_livingmemory.core.utils.stopwords_manager import (

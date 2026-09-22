@@ -48,18 +48,6 @@ class FakeMemoryEngine:
     async def add_memory(self, **kwargs):
         return 999
 
-    async def replace_memory(self, memory_id: int, **kwargs):
-        return 999
-
-    async def get_memory_source(self, memory_id: int):
-        return []
-
-    async def get_memory_transfer_records(self, memory_ids=None):
-        return []
-
-    async def get_memory_import_keys(self):
-        return set()
-
     async def delete_memory(self, memory_id: int):
         return True
 
@@ -78,7 +66,6 @@ class FakeInitializer:
         self.memory_engine = FakeMemoryEngine()
         self.conversation_manager = None
         self.index_validator = None
-        self.memory_processor = None
         self.data_dir = "/tmp/test_plugin"
 
 
@@ -138,12 +125,10 @@ def _patch_page_request(req: MagicMock):
     import astrbot_plugin_livingmemory.core.page_api as mod
     import astrbot_plugin_livingmemory.core.page_api_modules.graph_handler as graph_mod
     import astrbot_plugin_livingmemory.core.page_api_modules.memory_handler as memory_mod
-    import astrbot_plugin_livingmemory.core.page_api_modules.memory_handler_io as memory_io_mod
-    import astrbot_plugin_livingmemory.core.page_api_modules.memory_handler_update as memory_upd_mod
     import astrbot_plugin_livingmemory.core.page_api_modules.recall_handler as recall_mod
 
     # Patch all modules that use request
-    modules = [mod, memory_mod, memory_io_mod, memory_upd_mod, recall_mod, graph_mod]
+    modules = [mod, memory_mod, recall_mod, graph_mod]
     old_values = []
 
     for module in modules:
@@ -831,89 +816,18 @@ class TestUpdateMemory:
                 "astrbot_plugin_livingmemory.core.page_api_modules.memory_handler.MemoryHandler._get_memory_record",
                 return_value=memory,
             ):
-                api.plugin.initializer.memory_engine.replace_memory = AsyncMock(
+                api.plugin.initializer.memory_engine.add_memory = AsyncMock(
                     return_value=999
                 )
                 result = await api.update_memory()
 
         assert result["status"] == "ok"
         assert (
-            api.plugin.initializer.memory_engine.replace_memory.call_args.kwargs[
+            api.plugin.initializer.memory_engine.add_memory.call_args.kwargs[
                 "importance"
             ]
             == 0.5
         )
-
-    @pytest.mark.asyncio
-    async def test_structured_update_replaces_topics_and_key_facts_once(self, api):
-        engine = api.plugin.initializer.memory_engine
-        engine.replace_memory = AsyncMock(return_value=42)
-        req = _mock_page_request(
-            get_json={
-                "memory_id": 1,
-                "field": "structured",
-                "value": {
-                    "content": "new summary",
-                    "topics": ["release", "release", " deployment "],
-                    "key_facts": ["Release is Friday"],
-                    "status": "active",
-                    "type": "EVENT",
-                    "importance": 8,
-                },
-                "value_scale": "display",
-                "reason": "correct summary",
-            }
-        )
-        memory = {
-            "id": 1,
-            "text": "old summary",
-            "metadata": {
-                "topics": ["old"],
-                "key_facts": ["old fact"],
-                "status": "active",
-                "memory_type": "GENERAL",
-                "importance": 0.5,
-            },
-        }
-        with _patch_page_request(req):
-            with patch(
-                "astrbot_plugin_livingmemory.core.page_api_modules.memory_handler.MemoryHandler._get_memory_record",
-                return_value=memory,
-            ):
-                result = await api.update_memory()
-
-        assert result["status"] == "ok"
-        assert result["data"]["new_memory_id"] == 42
-        engine.replace_memory.assert_awaited_once()
-        call = engine.replace_memory.call_args
-        assert call.args == (1,)
-        assert call.kwargs["content"] == "new summary"
-        assert call.kwargs["importance"] == 0.8
-        assert call.kwargs["metadata"]["topics"] == ["release", "deployment"]
-        assert call.kwargs["metadata"]["key_facts"] == ["Release is Friday"]
-        assert call.kwargs["metadata"]["canonical_summary"] == "new summary"
-
-    @pytest.mark.asyncio
-    async def test_structured_update_rejects_more_than_five_topics(self, api):
-        engine = api.plugin.initializer.memory_engine
-        engine.replace_memory = AsyncMock(return_value=42)
-        req = _mock_page_request(
-            get_json={
-                "memory_id": 1,
-                "field": "topics",
-                "value": [f"topic-{index}" for index in range(6)],
-            }
-        )
-        with _patch_page_request(req):
-            with patch(
-                "astrbot_plugin_livingmemory.core.page_api_modules.memory_handler.MemoryHandler._get_memory_record",
-                return_value={"id": 1, "text": "summary", "metadata": {}},
-            ):
-                result = await api.update_memory()
-
-        assert result["status"] == "error"
-        assert "最多允许 5 项" in result["message"]
-        engine.replace_memory.assert_not_awaited()
 
 
 class TestBatchDeleteMemories:
@@ -1036,39 +950,6 @@ class TestGraphEndpoints:
             result = await api.get_graph_overview()
         assert result["status"] == "ok"
         assert result["data"]["enabled"] is False
-
-    @pytest.mark.asyncio
-    async def test_overview_full_graph_uses_unlimited_snapshot(self):
-        snapshot = {
-            "nodes": [{"id": 1, "type": "topic", "label": "all"}],
-            "edges": [],
-            "entries": [],
-            "memories": [],
-        }
-        graph_store = SimpleNamespace(
-            get_full_graph_snapshot=AsyncMock(return_value=snapshot),
-            get_graph_snapshot=AsyncMock(),
-        )
-        engine = FakeMemoryEngine(graph_store=graph_store)
-        api = PluginPageApi(FakePlugin(memory_engine=engine))
-        req = _mock_page_request(
-            args={
-                "full_graph": "true",
-                "session_id": "scope-1",
-                "persona_id": "persona-1",
-            }
-        )
-
-        with _patch_page_request(req):
-            result = await api.get_graph_overview()
-
-        assert result["status"] == "ok"
-        assert result["data"]["summary"]["visible_node_count"] == 1
-        graph_store.get_full_graph_snapshot.assert_awaited_once_with(
-            session_id="scope-1",
-            persona_id="persona-1",
-        )
-        graph_store.get_graph_snapshot.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_query_invalid_params(self, api):
@@ -1256,7 +1137,8 @@ class TestEnsurePluginReady:
 
 
 class TestRouteRegistration:
-    def test_registers_all_ten_routes(self):
+    def test_registers_all_seventeen_routes(self):
+        """路由数=20（8/19 加 gate/restore + autonomous 两端点：暂存捞回 & 自主存档翻案权）"""
         plugin = FakePlugin()
         api = PluginPageApi(plugin)
         api.register_routes()
@@ -1266,355 +1148,16 @@ class TestRouteRegistration:
         prefix = PAGE_API_PREFIX
         assert f"{prefix}/stats" in paths
         assert f"{prefix}/memories" in paths
+        assert f"{prefix}/memories/detail" in paths
         assert f"{prefix}/memories/update" in paths
-        assert f"{prefix}/memories/resummarize" in paths
-        assert f"{prefix}/memories/export" in paths
-        assert f"{prefix}/memories/import" in paths
         assert f"{prefix}/memories/batch-delete" in paths
+        assert f"{prefix}/memories/batch-update" in paths
         assert f"{prefix}/recall/test" in paths
         assert f"{prefix}/graph/overview" in paths
         assert f"{prefix}/graph/query" in paths
         assert f"{prefix}/backups" in paths
-        assert f"{prefix}/consolidation/status" in paths
-        assert f"{prefix}/consolidation/run" in paths
+        assert f"{prefix}/trace/list" in paths
+        assert f"{prefix}/trace/detail" in paths
 
     def test_route_prefix_contains_plugin_name(self):
         assert PLUGIN_NAME in PAGE_API_PREFIX
-
-
-@pytest.mark.asyncio
-async def test_memory_detail_includes_retained_source():
-    engine = FakeMemoryEngine()
-    engine.get_memory_source = AsyncMock(
-        return_value=[{"role": "user", "content": "exact detail"}]
-    )
-    api = PluginPageApi(FakePlugin(memory_engine=engine))
-    api.memory_handler._get_memory_record = AsyncMock(
-        return_value={
-            "id": 7,
-            "doc_id": "memory-7",
-            "text": "summary",
-            "metadata": {"importance": 0.9},
-            "created_at": "2026-01-01",
-            "updated_at": "2026-01-01",
-        }
-    )
-    req = _mock_page_request(args={"memory_id": "7"})
-
-    with _patch_page_request(req):
-        result = await api.get_memory_detail()
-
-    assert result["status"] == "ok"
-    assert result["data"]["source_messages"] == [
-        {"role": "user", "content": "exact detail"}
-    ]
-    engine.get_memory_source.assert_awaited_once_with(7)
-
-
-@pytest.mark.asyncio
-async def test_resummarize_memory_rebuilds_from_retained_source():
-    engine = FakeMemoryEngine()
-    engine.get_memory = AsyncMock(
-        return_value={
-            "id": 7,
-            "text": "old summary",
-            "metadata": {"session_id": "s1", "persona_id": "p1"},
-        }
-    )
-    engine.get_memory_source = AsyncMock(
-        return_value=[
-            {
-                "id": 1,
-                "session_id": "s1",
-                "role": "user",
-                "content": "exact detail",
-                "sender_id": "u1",
-                "timestamp": 1.0,
-                "metadata": {},
-            },
-            {
-                "id": 2,
-                "session_id": "s1",
-                "role": "assistant",
-                "content": "response",
-                "sender_id": "bot",
-                "timestamp": 2.0,
-                "metadata": {"is_bot_message": True},
-            },
-        ]
-    )
-    engine.replace_memory = AsyncMock(return_value=8)
-    plugin = FakePlugin(memory_engine=engine)
-    processor = MagicMock()
-    processor.process_conversation = AsyncMock(
-        return_value=("new summary", {"topics": ["detail"]}, 0.9)
-    )
-    plugin.initializer.memory_processor = processor
-    api = PluginPageApi(plugin)
-    api.memory_handler._get_memory_record = AsyncMock(
-        return_value={
-            "id": 7,
-            "text": "old summary",
-            "metadata": {"session_id": "s1", "persona_id": "p1"},
-        }
-    )
-    req = _mock_page_request(get_json={"memory_id": 7})
-
-    with _patch_page_request(req):
-        result = await api.resummarize_memory()
-
-    assert result["status"] == "ok"
-    assert result["data"]["new_memory_id"] == 8
-    processor.process_conversation.assert_awaited_once()
-    engine.replace_memory.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_export_memories_returns_native_json_content():
-    engine = FakeMemoryEngine()
-    engine.get_memory_transfer_records = AsyncMock(
-        return_value=[
-            {
-                "original_id": 7,
-                "content": "portable summary",
-                "importance": 0.8,
-                "session_id": "s1",
-                "persona_id": None,
-                "metadata": {"topics": ["portable"]},
-                "source_messages": [],
-            }
-        ]
-    )
-    api = PluginPageApi(FakePlugin(memory_engine=engine))
-    req = _mock_page_request(
-        get_json={"format": "json", "memory_ids": [7]}
-    )
-
-    with _patch_page_request(req):
-        result = await api.export_memories()
-
-    assert result["status"] == "ok"
-    assert result["data"]["memory_count"] == 1
-    exported = json.loads(result["data"]["content"])
-    assert exported["format"] == "livingmemory"
-    assert exported["memories"][0]["content"] == "portable summary"
-    engine.get_memory_transfer_records.assert_awaited_once_with([7])
-
-
-@pytest.mark.asyncio
-async def test_import_preview_reports_duplicates_and_invalid_items():
-    engine = FakeMemoryEngine()
-    engine.get_memory_import_keys = AsyncMock(
-        return_value={("existing summary", "s1", "")}
-    )
-    api = PluginPageApi(FakePlugin(memory_engine=engine))
-    content = json.dumps(
-        [
-            {"summary": "existing summary", "session_id": "s1"},
-            {"summary": "new summary", "session_id": "s1"},
-            {"messages": [{"role": "user"}]},
-        ]
-    )
-    req = _mock_page_request(
-        get_json={
-            "format": "json",
-            "content": content,
-            "dry_run": True,
-            "duplicate_strategy": "skip",
-        }
-    )
-
-    with _patch_page_request(req):
-        result = await api.import_memories()
-
-    assert result["status"] == "ok"
-    assert result["data"]["valid_count"] == 2
-    assert result["data"]["invalid_count"] == 1
-    assert result["data"]["duplicate_count"] == 1
-    assert result["data"]["planned_import_count"] == 1
-
-
-@pytest.mark.asyncio
-async def test_import_source_only_conversation_uses_processor_and_retains_source():
-    engine = FakeMemoryEngine()
-    engine.get_memory_import_keys = AsyncMock(return_value=set())
-    engine.add_memory = AsyncMock(return_value=42)
-    processor = MagicMock()
-    processor.process_conversation = AsyncMock(
-        return_value=("generated summary", {"topics": ["import"]}, 0.7)
-    )
-    processor.classify_atoms_from_metadata.return_value = []
-    plugin = FakePlugin(memory_engine=engine)
-    plugin.initializer.memory_processor = processor
-    api = PluginPageApi(plugin)
-    content = json.dumps(
-        [
-            {"role": "user", "content": "The code is alpha"},
-            {"role": "assistant", "content": "Noted"},
-        ]
-    )
-    req = _mock_page_request(
-        get_json={
-            "format": "json",
-            "content": content,
-            "dry_run": False,
-            "duplicate_strategy": "skip",
-        }
-    )
-
-    with _patch_page_request(req):
-        result = await api.import_memories()
-
-    assert result["status"] == "ok"
-    assert result["data"]["imported_ids"] == [42]
-    processor.process_conversation.assert_awaited_once()
-    add_kwargs = engine.add_memory.await_args.kwargs
-    assert add_kwargs["content"] == "generated summary"
-    assert add_kwargs["importance"] == 0.7
-    assert len(add_kwargs["source_messages"]) == 2
-    assert add_kwargs["metadata"]["memory_origin"] == "memory_import"
-
-
-@pytest.mark.asyncio
-async def test_import_allow_strategy_keeps_duplicate_entries():
-    engine = FakeMemoryEngine()
-    engine.get_memory_import_keys = AsyncMock(
-        return_value={("existing summary", "s1", "")}
-    )
-    engine.add_memory = AsyncMock(side_effect=[41, 42])
-    api = PluginPageApi(FakePlugin(memory_engine=engine))
-    content = json.dumps(
-        [
-            {"summary": "existing summary", "session_id": "s1"},
-            {"summary": "existing summary", "session_id": "s1"},
-        ]
-    )
-    req = _mock_page_request(
-        get_json={
-            "format": "json",
-            "content": content,
-            "dry_run": False,
-            "duplicate_strategy": "allow",
-        }
-    )
-
-    with _patch_page_request(req):
-        result = await api.import_memories()
-
-    assert result["status"] == "ok"
-    assert result["data"]["imported_ids"] == [41, 42]
-    assert result["data"]["skipped_duplicate_count"] == 0
-    assert engine.add_memory.await_count == 2
-
-
-@pytest.mark.asyncio
-async def test_import_source_only_without_processor_reports_failure():
-    engine = FakeMemoryEngine()
-    engine.get_memory_import_keys = AsyncMock(return_value=set())
-    engine.add_memory = AsyncMock()
-    api = PluginPageApi(FakePlugin(memory_engine=engine))
-    content = json.dumps(
-        [
-            {"role": "user", "content": "The code is alpha"},
-            {"role": "assistant", "content": "Noted"},
-        ]
-    )
-    req = _mock_page_request(
-        get_json={"format": "json", "content": content, "dry_run": False}
-    )
-
-    with _patch_page_request(req):
-        result = await api.import_memories()
-
-    assert result["status"] == "ok"
-    assert result["data"]["imported_count"] == 0
-    assert result["data"]["failed_count"] == 1
-    assert "记忆处理器未初始化" in result["data"]["errors"][0]["error"]
-    engine.add_memory.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_import_failure_does_not_stop_later_entries():
-    engine = FakeMemoryEngine()
-    engine.get_memory_import_keys = AsyncMock(return_value=set())
-    engine.add_memory = AsyncMock(side_effect=[RuntimeError("write failed"), 52])
-    api = PluginPageApi(FakePlugin(memory_engine=engine))
-    content = json.dumps(
-        [{"summary": "first"}, {"summary": "second"}]
-    )
-    req = _mock_page_request(
-        get_json={"format": "json", "content": content, "dry_run": False}
-    )
-
-    with _patch_page_request(req):
-        result = await api.import_memories()
-
-    assert result["status"] == "ok"
-    assert result["data"]["imported_ids"] == [52]
-    assert result["data"]["failed_count"] == 1
-    assert result["data"]["errors"] == [
-        {"index": 0, "error": "write failed"}
-    ]
-    assert engine.add_memory.await_count == 2
-
-
-class TestConsolidationHandler:
-    @pytest.mark.asyncio
-    async def test_run_delegates_to_manager(self):
-        from astrbot_plugin_livingmemory.core.page_api_modules.consolidation_handler import (
-            ConsolidationHandler,
-        )
-        from astrbot_plugin_livingmemory.core.page_api_modules.utils import PageApiUtils
-
-        handler = ConsolidationHandler(PageApiUtils())
-        manager = AsyncMock()
-        manager.run_consolidation = AsyncMock(
-            return_value={"groups": 2, "merged": 6, "archived": 6}
-        )
-        result = await handler.run(manager)
-        assert result["status"] == "ok"
-        assert result["data"]["merged"] == 6
-        manager.run_consolidation.assert_awaited_once_with(force=True)
-
-    @pytest.mark.asyncio
-    async def test_run_returns_error_when_manager_none(self):
-        from astrbot_plugin_livingmemory.core.page_api_modules.consolidation_handler import (
-            ConsolidationHandler,
-        )
-        from astrbot_plugin_livingmemory.core.page_api_modules.utils import PageApiUtils
-
-        handler = ConsolidationHandler(PageApiUtils())
-        result = await handler.run(None)
-        assert result["status"] == "error"
-
-    @pytest.mark.asyncio
-    async def test_get_status_returns_counts(self, tmp_path):
-        from astrbot_plugin_livingmemory.core.base.config_manager import ConfigManager
-        from astrbot_plugin_livingmemory.core.page_api_modules.consolidation_handler import (
-            ConsolidationHandler,
-        )
-        from astrbot_plugin_livingmemory.core.page_api_modules.utils import PageApiUtils
-
-        db_path = str(tmp_path / "cons.db")
-        async with aiosqlite.connect(db_path) as db:
-            await db.execute(
-                "CREATE TABLE documents (id INTEGER PRIMARY KEY, text TEXT, metadata TEXT)"
-            )
-            await db.execute(
-                "INSERT INTO documents(text, metadata) VALUES ('a', ?)",
-                (json.dumps({"consolidated_from": [1, 2], "status": "active"}),),
-            )
-            await db.execute(
-                "INSERT INTO documents(text, metadata) VALUES ('b', ?)",
-                (json.dumps({"status": "archived"}),),
-            )
-            await db.commit()
-
-        engine = SimpleNamespace(db_path=db_path)
-        handler = ConsolidationHandler(PageApiUtils())
-        result = await handler.get_status(engine, None, ConfigManager())
-
-        assert result["status"] == "ok"
-        assert result["data"]["consolidated_count"] == 1
-        assert result["data"]["archived_count"] == 1
-        assert result["data"]["config"]["enabled"] is False

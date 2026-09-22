@@ -1,9 +1,10 @@
 """Extended tests for core/utils/__init__.py to improve coverage."""
 
+import asyncio
 import json
 import time
 from datetime import datetime
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 import pytz
@@ -369,74 +370,6 @@ class TestFormatMemoriesForInjection:
 
         result = format_memories_for_injection(memories)
         assert "带元数据的记忆" in result
-
-    def test_format_uses_persona_summary_without_repeating_key_facts(self):
-        memories = [
-            {
-                "content": "事实检索摘要 | 张三周五发布",
-                "score": 0.9,
-                "metadata": {
-                    "persona_summary": "我记得张三周五要发布呀！",
-                    "key_facts": ["张三周五发布"],
-                    "importance": 0.8,
-                },
-            }
-        ]
-
-        result = format_memories_for_injection(memories)
-
-        assert "我记得张三周五要发布呀！" in result
-        assert "事实检索摘要" not in result
-        assert result.count("张三周五发布") == 1
-
-    def test_format_strips_exact_key_fact_suffix_from_legacy_v2_content(self):
-        memories = [
-            {
-                "content": "我记得张三周五要发布呀！ | 张三周五发布；需要准备清单",
-                "score": 0.9,
-                "metadata": {
-                    "summary_schema_version": "v2",
-                    "key_facts": ["张三周五发布", "需要准备清单"],
-                    "importance": 0.8,
-                },
-            }
-        ]
-
-        result = format_memories_for_injection(memories)
-
-        assert "我记得张三周五要发布呀！" in result
-        assert result.count("张三周五发布") == 1
-        assert result.count("需要准备清单") == 1
-
-    def test_format_preserves_nonmatching_legacy_content(self):
-        memories = [
-            {
-                "content": "普通旧记忆正文",
-                "metadata": {
-                    "summary_schema_version": "v2",
-                    "key_facts": ["另一个事实"],
-                },
-            }
-        ]
-
-        result = format_memories_for_injection(memories)
-
-        assert "普通旧记忆正文" in result
-
-    def test_format_includes_deterministic_source_time_tags(self):
-        memories = [
-            {
-                "content": "发布计划已确认",
-                "metadata": {
-                    "time_tags": ["2025-05-01", "2025-05-02"],
-                    "importance": 0.8,
-                },
-            }
-        ]
-
-        result = format_memories_for_injection(memories)
-
-        assert "Source time: 2025-05-01 - 2025-05-02" in result
 
 
 class TestNumberUtils:

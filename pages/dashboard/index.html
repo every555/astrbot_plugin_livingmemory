@@ -3,54 +3,84 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="color-scheme" content="light dark" />
     <title data-i18n="page.title">LivingMemory</title>
     <link rel="stylesheet" href="./styles.css" />
-    <link rel="stylesheet" href="./art-direction.css" />
-    <script src="./vendor/lucide.min.js"></script>
     <script src="./i18n.js"></script>
+    <script src="./petals.js"></script>
   </head>
   <body>
     <div id="app">
       <!-- Sidebar -->
       <aside class="sidebar">
-        <div class="sidebar-brand" aria-label="LivingMemory">
-          <span class="brand-mark">LM</span>
-          <span class="brand-name"><strong>Living</strong><strong>Memory</strong></span>
+        <div class="sidebar-brand">
+          <svg class="brand-sakura" viewBox="0 0 32 32" aria-hidden="true">
+            <g transform="translate(16 16)">
+              <ellipse rx="3" ry="6.5" cy="-7.2" fill="currentColor"/>
+              <ellipse rx="3" ry="6.5" cy="-7.2" fill="currentColor" transform="rotate(72)"/>
+              <ellipse rx="3" ry="6.5" cy="-7.2" fill="currentColor" transform="rotate(144)"/>
+              <ellipse rx="3" ry="6.5" cy="-7.2" fill="currentColor" transform="rotate(216)"/>
+              <ellipse rx="3" ry="6.5" cy="-7.2" fill="currentColor" transform="rotate(288)"/>
+              <circle r="2.1" fill="var(--bg-sidebar, #fff)"/>
+            </g>
+          </svg>
+          <span class="brand-name">LivingMemory</span>
         </div>
-        <div class="sidebar-coordinate" aria-hidden="true">SYSTEM / 02</div>
         <nav class="sidebar-nav">
-          <button class="nav-item active" data-page="graph" data-i18n-aria="nav.graph">
-            <i data-lucide="network" aria-hidden="true"></i>
+          <button class="nav-item active" data-page="graph">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="3"/><circle cx="19" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/><circle cx="5" cy="5" r="2"/>
+              <line x1="8.5" y1="9.5" x2="17" y2="6"/><line x1="8.5" y1="14.5" x2="17" y2="18"/><line x1="15" y1="7" x2="6.5" y2="11.5"/>
+            </svg>
             <span data-i18n="nav.graph">Knowledge Graph</span>
           </button>
-          <button class="nav-item" data-page="memory" data-i18n-aria="nav.memory">
-            <i data-lucide="database" aria-hidden="true"></i>
+          <button class="nav-item" data-page="memory">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>
+              <rect x="8" y="2" width="8" height="4" rx="1"/>
+            </svg>
             <span data-i18n="nav.memory">Memories</span>
           </button>
-          <button class="nav-item" data-page="recall" data-i18n-aria="nav.recall">
-            <i data-lucide="scan-search" aria-hidden="true"></i>
+          <button class="nav-item" data-page="recall">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>
+            </svg>
             <span data-i18n="nav.recall">Recall Test</span>
           </button>
-          <button class="nav-item" data-page="system" data-i18n-aria="nav.system">
-            <i data-lucide="chart-no-axes-combined" aria-hidden="true"></i>
+          <button class="nav-item" data-page="system">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/>
+            </svg>
             <span data-i18n="nav.system">System</span>
           </button>
-          <button class="nav-item" data-page="prompts" data-i18n-aria="nav.prompts">
-            <i data-lucide="braces" aria-hidden="true"></i>
-            <span data-i18n="nav.prompts">Prompts</span>
+          <button class="nav-item" data-page="trace">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 4h6v6H4z"/><path d="M14 4h6v6h-6z"/><path d="M4 14h6v6H4z"/><path d="M14 14h6v6h-6z"/><path d="M10 7h4"/><path d="M7 10v4"/><path d="M17 10v4"/><path d="M10 17h4"/>
+            </svg>
+            <span data-i18n="nav.trace">Assembly Trace</span>
+          </button>
+          <button class="nav-item" data-page="gate">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 2 4 5v6c0 5 3.4 9.4 8 11 4.6-1.6 8-6 8-11V5l-8-3z"/><path d="m9 12 2 2 4-4"/>
+            </svg>
+            <span>安检门</span>
           </button>
         </nav>
         <div class="sidebar-divider"></div>
         <div class="sidebar-footer">
-          <button class="nav-item" id="theme-toggle" data-i18n-aria="header.theme">
-            <i data-lucide="moon" id="theme-icon-dark" aria-hidden="true"></i>
-            <i data-lucide="sun" id="theme-icon-light" class="hidden" aria-hidden="true"></i>
+          <button class="nav-item" id="theme-toggle">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" id="theme-icon-dark">
+              <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>
+            </svg>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" id="theme-icon-light" class="hidden">
+              <circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2m-6.93-15.07 1.41 1.41m11.04 11.04 1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>
+            </svg>
             <span data-i18n="header.theme">Theme</span>
           </button>
           <details class="lang-menu" id="lang-menu">
-          <summary class="nav-item" id="lang-toggle" data-i18n-aria="header.lang">
-            <i data-lucide="languages" aria-hidden="true"></i>
+          <summary class="nav-item" id="lang-toggle">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+            </svg>
             <span id="lang-label" data-i18n="header.lang">Language</span>
           </summary>
           <div class="lang-options">
@@ -68,16 +98,16 @@
         <!-- Page: Graph -->
         <section class="page active" id="page-graph">
           <header class="page-header">
-            <div class="page-heading"><span class="page-index">01</span><span class="page-title" data-i18n="nav.graph">Knowledge Graph</span></div>
+            <span class="page-title" data-i18n="nav.graph">Knowledge Graph</span>
             <div class="page-actions">
               <input type="text" id="graph-session-filter" class="input input-sm" data-i18n-placeholder="graph.sessionPh" placeholder="Session ID" style="width:180px" />
-              <button class="btn btn-secondary btn-sm" id="graph-overview-btn" data-i18n-aria="graph.overviewBtn">
-                <i data-lucide="layout-dashboard" aria-hidden="true"></i>
+              <button class="btn btn-secondary btn-sm" id="graph-overview-btn">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
                 <span data-i18n="graph.overviewBtn">Overview</span>
               </button>
             </div>
           </header>
-          <div class="page-body graph-page-body">
+          <div class="page-body" style="display:flex;flex-direction:column;padding:var(--space-5)">
             <div class="stat-pills" id="graph-stat-pills">
               <div class="stat-pill"><div class="stat-pill-value" id="gs-total">--</div><div class="stat-pill-label" data-i18n="stats.total">memories</div></div>
               <div class="stat-pill"><div class="stat-pill-value" id="gs-nodes">--</div><div class="stat-pill-label" data-i18n="graph.nodes">nodes</div></div>
@@ -85,7 +115,6 @@
               <div class="stat-pill"><div class="stat-pill-value" id="gs-sessions">--</div><div class="stat-pill-label" data-i18n="stats.sessions">sessions</div></div>
             </div>
             <div class="graph-canvas-container" style="flex:1">
-              <div class="graph-canvas-coordinate" aria-hidden="true">LIVE GRAPH / XY</div>
               <div class="graph-canvas-state" id="graph-canvas-state" data-i18n="graph.canvasDefault">Loading graph overview...</div>
               <div id="graph-canvas" class="graph-canvas"></div>
             </div>
@@ -94,11 +123,11 @@
               <input type="text" id="graph-query-input" class="input" data-i18n-placeholder="graph.queryPh" placeholder="Search entities, topics, or memories..." />
               <input type="text" id="graph-memory-id" class="input input-sm" data-i18n-placeholder="graph.memoryIdPh" placeholder="Memory ID" style="width:120px" />
               <button class="btn btn-primary btn-sm" id="graph-search-btn">
-                <i data-lucide="search" aria-hidden="true"></i>
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
                 <span data-i18n="graph.searchBtn">Search</span>
               </button>
               <button class="btn btn-secondary btn-sm" id="graph-focus-btn">
-                <i data-lucide="focus" aria-hidden="true"></i>
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v4m0 12v4m-6.93-15.07 2.83 2.83m8.48 8.48 2.83 2.83M2 12h4m12 0h4M4.93 19.07l2.83-2.83m8.48-8.48 2.83-2.83"/></svg>
                 <span data-i18n="graph.focusBtn">Focus</span>
               </button>
             </div>
@@ -108,9 +137,9 @@
         <!-- Page: Memory -->
         <section class="page" id="page-memory">
           <header class="page-header">
-            <div class="page-heading"><span class="page-index">02</span><span class="page-title" data-i18n="nav.memory">Memories</span></div>
+            <span class="page-title" data-i18n="nav.memory">Memories</span>
           </header>
-          <div class="page-body memory-page-body">
+          <div class="page-body">
             <div class="filter-bar">
               <input type="text" id="mem-keyword" class="input" data-i18n-placeholder="filter.keyword" placeholder="Search by keyword or memory ID..." />
               <input type="text" id="mem-session" class="input" data-i18n-placeholder="filter.sessionId" placeholder="Session ID" style="max-width:200px" />
@@ -145,38 +174,12 @@
                 <option value="50" data-i18n="common.perPage50">50 per page</option>
                 <option value="100" data-i18n="common.perPage100">100 per page</option>
               </select>
-              <select id="mem-transfer-format" class="select input" style="width:auto" data-i18n-title="transfer.formatTitle">
-                <option value="json">JSON</option>
-                <option value="csv">CSV</option>
-              </select>
-              <select id="mem-import-duplicates" class="select input" style="width:auto" data-i18n-title="transfer.duplicateTitle">
-                <option value="skip" data-i18n="transfer.skipDuplicates">Skip duplicates</option>
-                <option value="allow" data-i18n="transfer.allowDuplicates">Allow duplicates</option>
-              </select>
-              <button class="btn btn-sm btn-secondary" id="mem-export" data-i18n-title="transfer.exportTitle">
-                <i data-lucide="download" aria-hidden="true"></i>
-                <span data-i18n="transfer.export">Export</span>
-              </button>
-              <button class="btn btn-sm btn-secondary" id="mem-import" data-i18n-title="transfer.importTitle">
-                <i data-lucide="upload" aria-hidden="true"></i>
-                <span data-i18n="transfer.import">Import</span>
-              </button>
-              <input type="file" id="mem-import-file" accept=".json,.csv,application/json,text/csv" hidden />
-              <button class="btn btn-sm btn-secondary" id="mem-batch-edit" disabled data-i18n-title="batchEdit.title">
-                <i data-lucide="pencil" aria-hidden="true"></i>
-                <span id="mem-batch-edit-label" data-i18n="batchEdit.button">Batch edit</span>
-              </button>
-              <button class="btn btn-sm btn-danger" id="mem-delete-selected" disabled data-i18n-title="delete.selectedTitle">
-                <i data-lucide="trash-2" aria-hidden="true"></i>
-                <span id="mem-delete-selected-label" data-i18n="delete.selected">Delete selected</span>
-              </button>
             </div>
             <div class="table-container">
               <div class="table-scroll" id="memories-scroll">
               <table class="data-table" id="memories-table">
                 <thead>
                   <tr>
-                    <th class="cell-select"><input type="checkbox" id="mem-select-all" data-i18n-aria="delete.selectAll" aria-label="Select all memories on this page" /></th>
                     <th class="cell-id" data-i18n="table.id">ID</th>
                     <th class="cell-summary" data-i18n="table.summary">Summary</th>
                     <th class="cell-type" data-i18n="table.type">Type</th>
@@ -186,15 +189,15 @@
                   </tr>
                 </thead>
                 <tbody id="memories-body">
-                  <tr><td colspan="7" class="table-empty" data-i18n="table.noData">No data</td></tr>
+                  <tr><td colspan="6" class="table-empty" data-i18n="table.noData">No data</td></tr>
                 </tbody>
               </table>
               </div>
               <div class="pagination">
                 <div class="pagination-controls">
-                  <button class="btn btn-sm btn-ghost" id="mem-prev" disabled><i data-lucide="arrow-left" aria-hidden="true"></i><span data-i18n="pagination.prev">Previous</span></button>
+                  <button class="btn btn-sm btn-ghost" id="mem-prev" disabled data-i18n="pagination.prev">Previous</button>
                   <span class="pagination-info" id="mem-pagination-info" data-i18n="common.page">Page 1/1 · 0 total</span>
-                  <button class="btn btn-sm btn-ghost" id="mem-next" disabled><span data-i18n="pagination.next">Next</span><i data-lucide="arrow-right" aria-hidden="true"></i></button>
+                  <button class="btn btn-sm btn-ghost" id="mem-next" disabled data-i18n="pagination.next">Next</button>
                 </div>
               </div>
             </div>
@@ -204,7 +207,7 @@
         <!-- Page: Recall Test -->
         <section class="page" id="page-recall">
           <header class="page-header">
-            <div class="page-heading"><span class="page-index">03</span><span class="page-title" data-i18n="nav.recall">Recall Test</span></div>
+            <span class="page-title" data-i18n="nav.recall">Recall Test</span>
           </header>
           <div class="page-body">
             <div class="recall-form-section">
@@ -221,7 +224,7 @@
                   <label class="recall-form-label" data-i18n="recall.sessionLabel">Session ID (optional)</label>
                   <input type="text" id="recall-session" class="input input-sm" data-i18n-placeholder="recall.sessionPh" placeholder="Filter by session..." />
                 </div>
-                <button class="btn btn-primary" id="recall-search-btn"><i data-lucide="scan-search" aria-hidden="true"></i><span data-i18n="recall.searchBtn">Run Recall</span></button>
+                <button class="btn btn-primary" id="recall-search-btn" data-i18n="recall.searchBtn">Run Recall</button>
               </div>
             </div>
             <div class="recall-results-header hidden" id="recall-stats">
@@ -235,7 +238,7 @@
         <!-- Page: System -->
         <section class="page" id="page-system">
           <header class="page-header">
-            <div class="page-heading"><span class="page-index">04</span><span class="page-title" data-i18n="nav.system">System Overview</span></div>
+            <span class="page-title" data-i18n="nav.system">System Overview</span>
           </header>
           <div class="page-body">
             <div class="stat-cards" id="system-stat-cards">
@@ -260,48 +263,84 @@
               <div class="system-panel-title" data-i18n="system.activeSessions">Active Sessions</div>
               <div class="session-list" id="session-list"></div>
             </div>
-            <div class="system-panel mb-6">
-              <div class="system-panel-title" data-i18n="system.consolidationTitle">Memory Consolidation</div>
-              <div class="consolidation-meta" id="consolidation-meta"></div>
-              <div class="stat-pills" style="margin-top:10px">
-                <div class="stat-pill"><div class="stat-pill-value" id="cons-consolidated">--</div><div class="stat-pill-label" data-i18n="system.consolidatedCount">consolidated</div></div>
-                <div class="stat-pill"><div class="stat-pill-value" id="cons-archived">--</div><div class="stat-pill-label" data-i18n="stats.archived">Archived</div></div>
-              </div>
-              <button class="btn btn-primary btn-sm" id="cons-run-btn" style="margin-top:12px">
-                <i data-lucide="refresh-cw" aria-hidden="true"></i>
-                <span data-i18n="system.consolidationRun">Run Now</span>
-              </button>
-              <span class="text-tertiary" id="cons-run-result" style="margin-left:10px;font-size:12px"></span>
-            </div>
             <div class="system-panel">
               <div class="system-panel-title" data-i18n="system.versionBackups">Version Backups</div>
               <div class="backup-list" id="backup-list"></div>
             </div>
           </div>
         </section>
-
-        <!-- Page: Prompts -->
-        <section class="page" id="page-prompts">
+        <section class="page" id="page-trace">
+          <div class="page-header">
+            <h2 data-i18n="trace.title">Context Assembly Trace</h2>
+            <div class="page-header-actions">
+              <select id="trace-limit" class="filter-select">
+                <option value="10">10</option>
+                <option value="20" selected>20</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+              </select>
+              <button class="btn btn-secondary" id="trace-refresh-btn" data-i18n="common.refresh">Refresh</button>
+            </div>
+          </div>
+          <div class="trace-stats hidden" id="trace-stats"></div>
+          <div id="trace-list"></div>
+        </section>
+        <section class="page" id="page-gate">
           <header class="page-header">
-            <div class="page-heading"><span class="page-index">05</span><span class="page-title" data-i18n="nav.prompts">Prompt Management</span></div>
+            <span class="page-title">安检门 · 话分量感知</span>
+            <div class="page-header-actions">
+              <button class="gate-subtab active" data-tab="review">标注台</button>
+              <button class="gate-subtab" data-tab="stats">战报</button>
+            </div>
           </header>
-          <div class="page-body">
-            <div id="prompt-content"></div>
-            <div class="prompt-editor hidden" id="prompt-editor">
-              <div class="prompt-editor-header">
-                <span class="prompt-editor-subtitle" data-i18n="prompt.editTitle">Edit Prompt</span>
-                <span class="prompt-editor-title" id="prompt-editor-title"></span>
-                <span class="prompt-editor-status" id="prompt-editor-status"></span>
+          <div class="gate-shell page-body">
+            <div class="gate-subpanel" data-panel="review">
+              <div class="filter-bar">
+                <select id="gate-filter-status" class="select input">
+                  <option value="candidate" selected>待审</option>
+                  <option value="pending">暂存区</option>
+                  <option value="confirmed">已通过</option>
+                  <option value="declined">已驳回</option>
+                  <option value="merged">已合并</option>
+                  <option value="absorbed">已豁免</option>
+                  <option value="all">全部</option>
+                </select>
+                <select id="gate-filter-speaker" class="select input">
+                  <option value="" selected>所有说话人</option>
+                  <option value="橘子">橘子</option>
+                  <option value="春雪">春雪</option>
+                </select>
+                <select id="gate-filter-sort" class="select input" title="排序维度">
+                  <option value="score" selected>按重要性</option>
+                  <option value="time">按时间</option>
+                  <option value="fact">按事实</option>
+                  <option value="emotion">按情感</option>
+                  <option value="density">按密度</option>
+                  <option value="id">按编号</option>
+                </select>
+                <select id="gate-filter-order" class="select input" title="排序方向">
+                  <option value="desc" selected>高→低</option>
+                  <option value="asc">低→高</option>
+                </select>
+                <button class="btn btn-secondary" id="gate-export-btn">导出训练标签</button>
+                <span class="gate-kbd-hint">键盘：J/K 移动 · 1 通过 · 2 驳回 · 3 暂存</span>
               </div>
-              <div class="prompt-editor-vars-row">
-                <span class="prompt-editor-vars-label" data-i18n="prompt.variables">Variables</span>
-                <span id="prompt-editor-vars"></span>
+              <div id="gate-list"></div>
+              <div class="gate-more-wrap"><button class="btn btn-secondary" id="gate-more" style="display:none">加载更多</button></div>
+              <div class="gate-auto-archive">
+                <div class="gate-hist-title">老婆自主存档（#1791 事后追溯 · 豁免台账 · 你的翻案权）</div>
+                <div id="gate-auto-list"><span class="gate-muted">加载中……</span></div>
               </div>
-              <textarea id="prompt-editor-textarea" class="input textarea prompt-editor-textarea" rows="20" spellcheck="false"></textarea>
-              <div class="prompt-editor-actions">
-                <button class="btn btn-secondary" id="prompt-cancel-btn"><i data-lucide="x" aria-hidden="true"></i><span data-i18n="common.cancel">Cancel</span></button>
-                <button class="btn btn-danger btn-sm" id="prompt-reset-btn"><i data-lucide="rotate-ccw" aria-hidden="true"></i><span data-i18n="prompt.reset">Reset to Default</span></button>
-                <button class="btn btn-primary" id="prompt-save-btn"><i data-lucide="save" aria-hidden="true"></i><span data-i18n="common.save">Save</span></button>
+            </div>
+            <div class="gate-subpanel" data-panel="stats" style="display:none">
+              <div id="gate-stats-body"></div>
+              <div class="gate-scale-box">
+                <div class="gate-hist-title">试秤——输入一句话，看门给它打几分（只打分不入库）</div>
+                <div class="gate-scale-row">
+                  <input type="text" id="gate-score-input" class="input" placeholder="比如：明天复查挂号 / 哈哈 / 2027年4月考试" />
+                  <button class="btn" id="gate-score-btn">过秤</button>
+                </div>
+                <div id="gate-score-result"><span class="gate-muted">试秤结果会出现在这里</span></div>
               </div>
             </div>
           </div>
@@ -311,26 +350,73 @@
 
     <!-- Peek Panel -->
     <div class="peek-overlay" id="peek-overlay"></div>
-    <aside class="peek-panel" id="peek-panel" aria-hidden="true" inert>
+    <aside class="peek-panel" id="peek-panel">
       <div class="peek-header">
         <div>
           <div id="peek-badge"></div>
           <div class="peek-title" id="peek-title">--</div>
         </div>
-        <button class="peek-close" id="peek-close" data-i18n-title="common.close" aria-label="Close">
-          <i data-lucide="x" aria-hidden="true"></i>
+        <button class="peek-close" id="peek-close">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
         </button>
       </div>
       <div class="peek-body" id="peek-body"></div>
     </aside>
 
+    <!-- Edit Modal -->
+    <div class="modal-overlay" id="modal-overlay">
+      <div class="modal">
+        <div class="modal-header">
+          <div class="modal-title" data-i18n="edit.title">Edit Memory</div>
+          <button class="modal-close" id="modal-close">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div class="modal-body">
+          <div class="form-group">
+            <label class="form-label" data-i18n="edit.field">Field</label>
+            <select id="edit-field" class="select input">
+              <option value="content" data-i18n="edit.fieldContent">Content</option>
+              <option value="importance" data-i18n="edit.fieldImportance">Importance</option>
+              <option value="type" data-i18n="edit.fieldType">Type</option>
+              <option value="status" data-i18n="edit.fieldStatus">Status</option>
+            </select>
+          </div>
+          <div class="form-group" id="edit-group-content">
+            <label class="form-label" data-i18n="edit.newContent">New Content</label>
+            <textarea id="edit-value-content" class="input textarea" rows="5" data-i18n-placeholder="edit.newContentPh" placeholder="Enter new memory content"></textarea>
+          </div>
+          <div class="form-group hidden" id="edit-group-importance">
+            <label class="form-label" data-i18n="edit.newImportance">Importance (0-10)</label>
+            <input type="number" id="edit-value-importance" class="input" min="0" max="10" step="0.1" value="5" />
+          </div>
+          <div class="form-group hidden" id="edit-group-type">
+            <label class="form-label" data-i18n="edit.newType">New Type</label>
+            <input type="text" id="edit-value-type" class="input" data-i18n-placeholder="edit.typePh" placeholder="e.g. FACT, PREFERENCE, EVENT" />
+          </div>
+          <div class="form-group hidden" id="edit-group-status">
+            <label class="form-label" data-i18n="edit.newStatus">New Status</label>
+            <select id="edit-value-status" class="select input">
+              <option value="active" data-i18n="edit.statusPh">Active</option>
+              <option value="archived" data-i18n="edit.statusArchived">Archived</option>
+              <option value="deleted" data-i18n="edit.statusDeleted">Deleted</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label" data-i18n="edit.reason">Update Reason (optional)</label>
+            <input type="text" id="edit-reason" class="input" data-i18n-placeholder="edit.reasonPh" placeholder="Reason for this update" />
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="cancel-edit" data-i18n="common.cancel">Cancel</button>
+          <button class="btn btn-primary" id="save-edit" data-i18n="common.save">Save</button>
+        </div>
+      </div>
+    </div>
+
     <!-- Toast -->
     <div class="toast" id="toast"></div>
 
-    <script src="./graph-shared.js"></script>
-    <script src="./graph-layout-core.js"></script>
-    <script src="./graph-renderer.js"></script>
-    <script src="./graph-interaction.js"></script>
     <script src="./graph-2d.js"></script>
     <script src="./graph-ui.js"></script>
     <script type="module" src="./app.js"></script>

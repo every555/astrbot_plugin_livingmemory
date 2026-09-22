@@ -39,9 +39,34 @@ class SessionManagerConfig(BaseModel):
     )
 
 
+class ContextBudgetConfig(BaseModel):
+    """P2-14 上下文预算工程：证据质量闸门 + Token 预算装填"""
+
+    enabled: bool = Field(
+        default=True,
+        description="是否启用上下文预算工程（证据闸门+冗余去重+token预算），关闭则回退全量注入",
+    )
+    max_tokens: int = Field(
+        default=1200, ge=100, le=20000,
+        description="记忆注入的 token 预算上限（估算口径：字符数/1.5），超长单条截断保头",
+    )
+    min_score: float = Field(
+        default=0.30, ge=0.0, le=1.0,
+        description="证据闸门绝对分数门槛：检索得分低于此值的记忆不注入（防MMA逻辑塌陷）",
+    )
+    relative_ratio: float = Field(
+        default=0.35, ge=0.0, le=1.0,
+        description="相对门槛：低于 top1得分×该比例的记忆不注入，0=关闭相对门槛",
+    )
+
+
 class RecallEngineConfig(BaseModel):
     """回忆引擎配置"""
 
+    context_budget: ContextBudgetConfig = Field(
+        default_factory=ContextBudgetConfig,
+        description="P2-14 上下文预算工程配置",
+    )
     top_k: int = Field(
         default=5, ge=0, le=50, description="返回记忆数量。设为 0 则跳过自动召回和注入"
     )
@@ -50,27 +75,6 @@ class RecallEngineConfig(BaseModel):
     )
     importance_weight: float = Field(
         default=1.0, ge=0.0, le=10.0, description="重要性权重"
-    )
-    min_importance_for_retrieval: float = Field(
-        default=0.0,
-        ge=0.0,
-        le=1.0,
-        description="召回记忆的最低重要性，0 表示不过滤",
-    )
-    min_similarity_for_retrieval: float = Field(
-        default=0.0,
-        ge=0.0,
-        le=1.0,
-        description="召回记忆的最低向量相似度，0 表示不过滤",
-    )
-    recent_memory_count: int = Field(
-        default=2, ge=0, le=20, description="每次召回保留的近期记忆数量"
-    )
-    recent_memory_max_age_hours: int = Field(
-        default=72, ge=0, le=8760, description="近期记忆时间窗口，0 表示不限制"
-    )
-    memory_type_filter: str = Field(
-        default="all", pattern="^(all|event_only)$", description="记忆类型过滤模式"
     )
     fallback_to_vector: bool = Field(default=True, description="是否启用向量检索回退")
     injection_method: str = Field(
@@ -91,12 +95,6 @@ class RecallEngineConfig(BaseModel):
     inject_with_recent_context: bool = Field(
         default=False,
         description="启用后使用最近2轮对话作为扩展查询关键词，提升检索精准度",
-    )
-    recent_context_max_age_seconds: int = Field(
-        default=7200,
-        ge=0,
-        le=604800,
-        description="扩展召回查询允许使用的历史消息最大时间间隔，0 表示不限制",
     )
     search_cache_enabled: bool = Field(
         default=True, description="是否启用短期检索结果缓存"
@@ -121,15 +119,6 @@ class ReflectionEngineConfig(BaseModel):
     summary_trigger_rounds: int = Field(
         default=10, ge=1, le=100, description="触发反思的对话轮次"
     )
-    include_source_time_tags: bool = Field(
-        default=True, description="是否从原始消息时间写入确定性时间标签"
-    )
-    source_retention_importance_threshold: float = Field(
-        default=0.8,
-        ge=0.0,
-        le=1.0,
-        description="保留原始对话的重要性阈值",
-    )
 
 
 class AgentToolsConfig(BaseModel):
@@ -149,9 +138,6 @@ class ForgettingAgentConfig(BaseModel):
     auto_cleanup_enabled: bool = Field(
         default=True, description="是否启用每日自动清理旧记忆"
     )
-    auto_archived_enabled: bool = Field(
-        default=False, description="自动清理候选是否归档而非删除"
-    )
     cleanup_days_threshold: int = Field(
         default=30, ge=1, le=3650, description="清理天数阈值"
     )
@@ -165,18 +151,6 @@ class FilteringConfig(BaseModel):
 
     use_persona_filtering: bool = Field(default=True, description="是否使用人格过滤")
     use_session_filtering: bool = Field(default=True, description="是否使用会话过滤")
-    memory_scope_mode: str = Field(
-        default="legacy", pattern="^(legacy|session|user|global)$"
-    )
-    isolated_sessions: str = Field(default="", description="强制隔离的会话列表")
-
-
-class AccessControlConfig(BaseModel):
-    """记忆访问控制与身份映射配置。"""
-
-    whitelist_enabled: bool = Field(default=False, description="是否启用记忆白名单")
-    allowed_ids: str = Field(default="", description="允许使用长期记忆的标识列表")
-    identity_aliases: str = Field(default="", description="跨平台用户身份别名")
 
 
 class ProviderConfig(BaseModel):
@@ -186,6 +160,8 @@ class ProviderConfig(BaseModel):
         default=None, description="Embedding Provider ID"
     )
     llm_provider_id: str | None = Field(default=None, description="LLM Provider ID")
+    # 2026-09-16 橘子令：账房先生(AppraisalEngine)专用工牌——此前缺字段导致配置被pydantic静默丢弃，评估引擎永远落DEFAULT(deepseek)
+    appraisal_provider_id: str | None = Field(default=None, description="Appraisal Engine Provider ID")
 
 
 class ImportanceDecayConfig(BaseModel):
@@ -200,12 +176,6 @@ class ImportanceDecayConfig(BaseModel):
     )
     access_count_decay_multiplier: float = Field(
         default=0.5, ge=0.0, le=1.0, description="每日衰减后访问次数保留比例"
-    )
-    protected_importance_threshold: float = Field(
-        default=1.0,
-        ge=0.0,
-        le=1.0,
-        description="达到该重要性的记忆不参与每日衰减",
     )
 
 
@@ -300,44 +270,6 @@ class GraphMemoryConfig(BaseModel):
         return self
 
 
-class MemoryConsolidationConfig(BaseModel):
-    """记忆库定期整合配置"""
-
-    enabled: bool = Field(
-        default=False, description="是否启用记忆库定期整合（聚合/总结）"
-    )
-    trigger: str = Field(
-        default="daily",
-        pattern="^(daily|reflection)$",
-        description="触发方式：daily=每日定时，reflection=每次反思时顺带执行",
-    )
-    granularity: str = Field(
-        default="session",
-        pattern="^(session|semantic)$",
-        description="聚合粒度：session=同一会话，semantic=跨会话语义聚类",
-    )
-    keep_original: str = Field(
-        default="archive",
-        pattern="^(archive|delete)$",
-        description="整合后旧记忆的处理方式：archive=归档保留，delete=直接删除",
-    )
-    min_memories_per_group: int = Field(
-        default=3, ge=2, le=50, description="每组至少多少条记忆才触发整合"
-    )
-    min_age_days: int = Field(
-        default=7, ge=0, le=3650, description="只整合创建时间早于 N 天的记忆"
-    )
-    max_importance: float = Field(
-        default=0.5, ge=0.0, le=1.0, description="只整合重要度低于此值的记忆"
-    )
-    max_groups_per_run: int = Field(
-        default=5, ge=1, le=100, description="每次运行最多整合的组数"
-    )
-    semantic_similarity_threshold: float = Field(
-        default=0.7, ge=0.0, le=1.0, description="语义聚类模式下合并的最小相似度"
-    )
-
-
 class LivingMemoryConfig(BaseModel):
     """完整插件配置"""
 
@@ -350,7 +282,6 @@ class LivingMemoryConfig(BaseModel):
     forgetting_agent: ForgettingAgentConfig = Field(
         default_factory=ForgettingAgentConfig
     )
-    access_control: AccessControlConfig = Field(default_factory=AccessControlConfig)
     filtering_settings: FilteringConfig = Field(default_factory=FilteringConfig)
     provider_settings: ProviderConfig = Field(default_factory=ProviderConfig)
     migration_settings: MigrationSettings = Field(default_factory=MigrationSettings)
@@ -363,9 +294,6 @@ class LivingMemoryConfig(BaseModel):
     )
     importance_decay: ImportanceDecayConfig = Field(
         default_factory=ImportanceDecayConfig, description="重要性衰减配置"
-    )
-    memory_consolidation: MemoryConsolidationConfig = Field(
-        default_factory=MemoryConsolidationConfig, description="记忆库定期整合配置"
     )
 
     model_config = {"extra": "allow"}  # 允许额外字段，向前兼容

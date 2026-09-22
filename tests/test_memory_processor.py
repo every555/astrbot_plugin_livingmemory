@@ -2,18 +2,12 @@
 Tests for MemoryProcessor.
 """
 
-import tempfile
-from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 from astrbot_plugin_livingmemory.core.models.conversation_models import Message
 from astrbot_plugin_livingmemory.core.processors.memory_processor import MemoryProcessor
-from astrbot_plugin_livingmemory.core.prompts.prompt_manager import (
-    get_prompt_manager,
-    init_prompt_manager,
-)
 
 
 class _DummyLLMProvider:
@@ -56,8 +50,7 @@ def _make_messages():
 async def test_process_conversation_success():
     llm = _DummyLLMProvider(
         """{
-            "summary":"张三明天下午三点要开会呀，我已经认真记下来啦！",
-            "canonical_summary":"张三明天下午三点开会，Bot 已确认提醒",
+            "summary":"我记录了张三明天下午三点开会，并给出提醒",
             "topics":["会议提醒"],
             "key_facts":["张三明天下午三点开会"],
             "sentiment":"neutral",
@@ -94,32 +87,6 @@ async def test_process_conversation_handles_non_json_response_with_fallback():
     assert 0.0 <= importance <= 1.0
 
 
-class TestPromptLiveReload:
-    """验证 WebUI 保存后 MemoryProcessor 立即使用新 prompt（不依赖实例字段缓存）。"""
-
-    def test_get_chat_prompt_reads_from_prompt_manager(self):
-        custom_text = "自定义私聊 prompt 内容 [{conversation}]"
-        with tempfile.TemporaryDirectory() as tmpdir:
-            init_prompt_manager(tmpdir)
-            get_prompt_manager().update_prompt("private_chat_prompt", custom_text)
-
-            llm = _DummyLLMProvider("{}")
-            processor = MemoryProcessor(llm_provider=llm, context=None)
-
-            live = processor._get_chat_prompt(is_group_chat=False)
-            assert live == custom_text
-
-            # 清理：重置为默认，避免影响其他测试
-            get_prompt_manager().reset_prompt("private_chat_prompt")
-
-    def test_get_chat_prompt_returns_valid_content(self):
-        llm = _DummyLLMProvider("{}")
-        processor = MemoryProcessor(llm_provider=llm, context=None)
-        live = processor._get_chat_prompt(is_group_chat=False)
-        assert isinstance(live, str) and len(live) > 50
-        assert "{conversation}" in live
-
-
 @pytest.mark.asyncio
 async def test_persona_prompt_is_included_when_available():
     llm = _DummyLLMProvider(
@@ -151,13 +118,11 @@ async def test_persona_prompt_is_included_when_available():
 async def test_dual_channel_summary_stores_canonical_and_persona():
     """
     process_conversation 应在 metadata 中同时存储
-    canonical_summary（供图抽取等中性消费方）和 persona_summary（人格风格展示用），
-    且检索内容 content 恒为 summary + key_facts 的富文本。
+    canonical_summary（检索用）和 persona_summary（人格风格用）。
     """
     llm = _DummyLLMProvider(
         """{
-            "summary":"张三明天下午三点要开会呀，我已经认真记下来啦！",
-            "canonical_summary":"张三明天下午三点开会，Bot 已确认提醒",
+            "summary":"我记录了张三明天下午三点开会，并给出提醒",
             "topics":["会议提醒"],
             "key_facts":["张三明天下午三点开会"],
             "sentiment":"neutral",
@@ -172,66 +137,27 @@ async def test_dual_channel_summary_stores_canonical_and_persona():
         persona_id=None,
     )
 
-    # canonical_summary 应保留 LLM 输出（自定义提示词兼容）
+    # canonical_summary 应存在且包含事实内容
     assert "canonical_summary" in metadata
-    assert "呀" not in metadata["canonical_summary"]
-    assert metadata["canonical_summary"] == "张三明天下午三点开会，Bot 已确认提醒"
+    assert len(metadata["canonical_summary"]) > 0
 
     # persona_summary 应存在（等于原始 LLM summary）
     assert "persona_summary" in metadata
     assert "张三" in metadata["persona_summary"]
-    assert "呀" in metadata["persona_summary"]
 
-    # content 应为 summary + key_facts 富文本（检索语料）
-    assert (
-        content
-        == "张三明天下午三点要开会呀，我已经认真记下来啦！ | 张三明天下午三点开会"
-    )
+    # content 应使用 canonical_summary（事实导向）
+    assert content == metadata["canonical_summary"]
 
     # schema 版本标记
     assert metadata.get("summary_schema_version") == "v2"
 
 
 @pytest.mark.asyncio
-async def test_source_time_tags_come_from_message_timestamps_without_rewriting_summary():
-    llm = _DummyLLMProvider(
-        '{"summary":"记住这件事", "canonical_summary":"发布计划已确认", '
-        '"topics":["发布"], "key_facts":["发布计划已确认"], '
-        '"sentiment":"neutral", "importance":0.8}'
-    )
-    messages = _make_messages()
-    messages[0].timestamp = datetime(2025, 5, 1, 9, 0).timestamp()
-    messages[1].timestamp = datetime(2025, 5, 2, 10, 0).timestamp()
-    processor = MemoryProcessor(llm_provider=llm, context=None)
-
-    content, metadata, _ = await processor.process_conversation(messages)
-
-    assert content == "记住这件事 | 发布计划已确认"
-    assert metadata["canonical_summary"] == "发布计划已确认"
-    assert metadata["time_tags"] == ["2025-05-01", "2025-05-02"]
-    assert metadata["source_time_label"] == "2025-05-01 - 2025-05-02"
-
-
-def test_atom_classification_persists_parent_memory_types():
-    processor = MemoryProcessor(context=None)
-    metadata = {
-        "key_facts": ["明天下午发布新版本", "用户喜欢爵士乐"],
-        "topics": ["发布", "音乐"],
-    }
-
-    atoms = processor.classify_atoms_from_metadata(metadata)
-
-    assert len(atoms) == 2
-    assert metadata["atom_types"] == ["planned", "preference"]
-
-
-@pytest.mark.asyncio
-async def test_canonical_summary_falls_back_to_rich_text():
-    """旧/自定义 Prompt 缺少 canonical_summary 时应回退为 summary + key_facts 富文本。"""
+async def test_canonical_summary_includes_key_facts():
+    """canonical_summary 应将 key_facts 拼接到摘要中，提升检索覆盖率。"""
     llm = _DummyLLMProvider(
         """{
             "summary":"用户提到了一个重要事项",
-            "canonical_summary":null,
             "topics":["备忘"],
             "key_facts":["明天下午三点开会", "需要准备PPT"],
             "sentiment":"neutral",
@@ -246,11 +172,9 @@ async def test_canonical_summary_falls_back_to_rich_text():
         persona_id=None,
     )
 
-    # 回退应同时包含 summary 与 key_facts，保证检索语料信息密度
+    # canonical_summary 应包含 key_facts 内容
     assert "明天下午三点开会" in metadata["canonical_summary"]
     assert "需要准备PPT" in metadata["canonical_summary"]
-    assert "用户提到了一个重要事项" in metadata["canonical_summary"]
-    assert content == metadata["canonical_summary"]
 
 
 @pytest.mark.asyncio

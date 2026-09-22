@@ -25,6 +25,7 @@ class _FakeInitializer:
         self.initialize = AsyncMock(return_value=False)
         self.ensure_initialized = AsyncMock(return_value=False)
         self.stop_background_tasks = AsyncMock()
+        self.stop_event_bus = AsyncMock()
         self.stop_scheduler = AsyncMock()
 
     @property
@@ -113,7 +114,11 @@ async def test_status_command_returns_not_ready_message_without_handler(
 async def test_terminate_cleans_background_tasks_and_resources(monkeypatch, tmp_path):
     plugin = await _build_plugin(monkeypatch, tmp_path)
 
-    plugin.event_handler = SimpleNamespace(shutdown=AsyncMock())
+    plugin.event_handler = SimpleNamespace(
+        shutdown=AsyncMock(),
+        session_summary_manager=SimpleNamespace(stop=AsyncMock()),
+        l3_synthesizer=SimpleNamespace(stop=AsyncMock()),
+    )
     plugin.command_handler = SimpleNamespace()
     plugin.initializer.conversation_manager = SimpleNamespace(
         store=SimpleNamespace(close=AsyncMock())

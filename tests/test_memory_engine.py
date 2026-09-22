@@ -101,9 +101,6 @@ class _FakeFaissDB:
         if target is not None:
             self.docs.pop(target, None)
 
-    async def close(self) -> None:
-        return None
-
 
 def test_memory_engine_atom_enabled_honors_explicit_false(tmp_path: Path):
     engine = MemoryEngine(
@@ -191,205 +188,6 @@ async def test_memory_engine_add_search_get_delete(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_memory_source_is_separate_transferred_and_deleted(tmp_path: Path):
-    engine = MemoryEngine(
-        db_path=str(tmp_path / "memory_source.db"),
-        faiss_db=_FakeFaissDB(),
-        config={"fallback_enabled": True},
-    )
-    await engine.initialize()
-    source = [
-        {
-            "id": 1,
-            "session_id": "s1",
-            "role": "user",
-            "content": "exact source detail",
-            "sender_id": "u1",
-            "timestamp": 100.0,
-            "metadata": {},
-        }
-    ]
-    memory_id = await engine.add_memory(
-        content="summary",
-        session_id="s1",
-        metadata={},
-        source_messages=source,
-    )
-
-    stored = await engine.get_memory(memory_id)
-    assert stored["metadata"]["has_source"] is True
-    assert "exact source detail" not in str(stored["metadata"])
-    assert await engine.get_memory_source(memory_id) == source
-
-    new_id = await engine.replace_memory(
-        memory_id,
-        content="new summary",
-        importance=0.8,
-        metadata=stored["metadata"],
-    )
-    assert await engine.get_memory_source(memory_id) == []
-    assert await engine.get_memory_source(new_id) == source
-
-    assert await engine.delete_memory(new_id) is True
-    assert await engine.get_memory_source(new_id) == []
-    await engine.close()
-
-
-@pytest.mark.asyncio
-async def test_memory_transfer_records_include_source_and_duplicate_key(tmp_path: Path):
-    engine = MemoryEngine(
-        db_path=str(tmp_path / "memory_transfer.db"),
-        faiss_db=_FakeFaissDB(),
-        config={"fallback_enabled": True},
-    )
-    await engine.initialize()
-    source = [
-        {
-            "id": 1,
-            "session_id": "s1",
-            "role": "user",
-            "content": "exact detail",
-            "sender_id": "u1",
-            "timestamp": 1.0,
-            "metadata": {},
-        }
-    ]
-    memory_id = await engine.add_memory(
-        content="portable summary",
-        session_id="s1",
-        persona_id="p1",
-        importance=0.9,
-        metadata={"topics": ["portable"]},
-        source_messages=source,
-    )
-    await engine.db_connection.execute(
-        "INSERT INTO documents (id, doc_id, text, metadata, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))",
-        (
-            memory_id,
-            f"uuid-{memory_id}",
-            "portable summary",
-            json.dumps(engine.faiss_db.docs[memory_id]["metadata"]),
-        ),
-    )
-    await engine.db_connection.commit()
-
-    records = await engine.get_memory_transfer_records([memory_id])
-    keys = await engine.get_memory_import_keys()
-
-    assert records[0]["content"] == "portable summary"
-    assert records[0]["source_messages"] == source
-    assert ("portable summary", "s1", "p1") in keys
-    await engine.close()
-
-
-@pytest.mark.asyncio
-async def test_memory_transfer_records_batches_more_than_500_selected_ids(
-    tmp_path: Path,
-):
-    engine = MemoryEngine(
-        db_path=str(tmp_path / "memory_transfer_batches.db"),
-        faiss_db=_FakeFaissDB(),
-        config={"fallback_enabled": True},
-    )
-    await engine.initialize()
-    assert engine.db_connection is not None
-    rows = [
-        (
-            memory_id,
-            f"uuid-{memory_id}",
-            f"memory {memory_id}",
-            json.dumps({"importance": 0.5}),
-        )
-        for memory_id in range(1, 502)
-    ]
-    await engine.db_connection.executemany(
-        "INSERT INTO documents (id, doc_id, text, metadata, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))",
-        rows,
-    )
-    await engine.db_connection.commit()
-
-    records = await engine.get_memory_transfer_records(list(range(501, 0, -1)))
-
-    assert len(records) == 501
-    assert [record["original_id"] for record in records] == list(range(1, 502))
-    await engine.close()
-
-
-@pytest.mark.asyncio
-async def test_memory_source_write_failure_rolls_back_indexed_memory(tmp_path: Path):
-    engine = MemoryEngine(
-        db_path=str(tmp_path / "memory_source_failure.db"),
-        faiss_db=_FakeFaissDB(),
-        config={"fallback_enabled": True},
-    )
-    await engine.initialize()
-    engine.save_memory_source = AsyncMock(side_effect=RuntimeError("disk full"))
-
-    with pytest.raises(RuntimeError, match="disk full"):
-        await engine.add_memory(
-            content="summary",
-            session_id="s1",
-            source_messages=[{"role": "user", "content": "source"}],
-        )
-
-    assert await engine.get_memory(1) is None
-    await engine.close()
-
-
-@pytest.mark.asyncio
-async def test_repair_add_clears_unavailable_source_metadata(tmp_path: Path):
-    engine = MemoryEngine(
-        db_path=str(tmp_path / "memory_source_repair.db"),
-        faiss_db=_FakeFaissDB(),
-        config={"fallback_enabled": True},
-    )
-    await engine.initialize()
-    memory_id = await engine.add_memory(content="summary", session_id="s1")
-    engine.faiss_db.docs[memory_id]["metadata"].update(
-        {"has_source": True, "source_message_count": 2}
-    )
-
-    async def _update_metadata(doc_id: int, metadata: dict) -> bool:
-        engine.faiss_db.docs[doc_id]["metadata"].update(metadata)
-        return True
-
-    engine.hybrid_retriever.update_metadata = AsyncMock(side_effect=_update_metadata)
-    op_id = await engine._start_write_op(
-        "add", {"session_id": "s1"}, memory_id=memory_id
-    )
-
-    assert await engine._repair_add_write_op(op_id, memory_id, {}) is True
-    repaired = await engine.get_memory(memory_id)
-    assert repaired["metadata"]["has_source"] is False
-    assert repaired["metadata"]["source_message_count"] == 0
-    await engine.close()
-
-
-@pytest.mark.asyncio
-async def test_repair_delete_removes_retained_source(tmp_path: Path):
-    engine = MemoryEngine(
-        db_path=str(tmp_path / "memory_source_delete_repair.db"),
-        faiss_db=_FakeFaissDB(),
-        config={"fallback_enabled": True},
-    )
-    await engine.initialize()
-    memory_id = await engine.add_memory(
-        content="summary",
-        session_id="s1",
-        source_messages=[{"role": "user", "content": "source"}],
-    )
-    op_id = await engine._start_write_op(
-        "delete", {"memory_id": memory_id}, memory_id=memory_id
-    )
-
-    assert await engine._repair_delete_write_op(op_id, memory_id) is True
-    assert await engine.get_memory_source(memory_id) == []
-    await engine.close()
-
-
-@pytest.mark.asyncio
 async def test_memory_engine_decay_and_cleanup(tmp_path: Path):
     db_path = tmp_path / "memory_decay.db"
     engine = MemoryEngine(
@@ -470,51 +268,6 @@ async def test_memory_engine_decay_and_cleanup(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_daily_decay_skips_protected_importance_threshold(tmp_path: Path):
-    engine = MemoryEngine(
-        db_path=str(tmp_path / "protected_decay.db"),
-        faiss_db=_FakeFaissDB(),
-        config={"protected_importance_threshold": 0.8},
-    )
-    await engine.initialize()
-    now = time.time()
-    rows = [
-        (101, "uuid-101", "protected", 0.9),
-        (102, "uuid-102", "decaying", 0.5),
-    ]
-    for memory_id, uuid, text, importance in rows:
-        metadata = json.dumps(
-            {
-                "importance": importance,
-                "create_time": now,
-                "last_access_time": now,
-                "access_count": 0,
-            }
-        )
-        await engine.db_connection.execute(
-            "INSERT INTO documents "
-            "(id, doc_id, text, metadata, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))",
-            (memory_id, uuid, text, metadata),
-        )
-    await engine.db_connection.commit()
-
-    affected = await engine.apply_daily_decay(0.1)
-    cursor = await engine.db_connection.execute(
-        "SELECT id, metadata FROM documents WHERE id IN (101, 102) ORDER BY id"
-    )
-    stored = {
-        int(row["id"]): json.loads(row["metadata"])["importance"]
-        for row in await cursor.fetchall()
-    }
-
-    assert affected == 1
-    assert stored[101] == 0.9
-    assert stored[102] == 0.45
-    await engine.close()
-
-
-@pytest.mark.asyncio
 async def test_memory_engine_search_updates_access_time_async(tmp_path: Path):
     db_path = tmp_path / "memory_access.db"
     engine = MemoryEngine(
@@ -543,157 +296,6 @@ async def test_memory_engine_search_updates_access_time_async(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_internal_memory_scope_skips_legacy_session_migration(tmp_path: Path):
-    engine = MemoryEngine(
-        db_path=str(tmp_path / "internal_scope.db"),
-        faiss_db=_FakeFaissDB(),
-        config={"fallback_enabled": True},
-    )
-    await engine.initialize()
-    engine._migrate_session_data_if_needed = AsyncMock()
-
-    await engine.search_memories(
-        "shared memory",
-        session_id="livingmemory:user:test:user-1",
-    )
-
-    engine._migrate_session_data_if_needed.assert_not_awaited()
-    await engine.close()
-
-
-@pytest.mark.asyncio
-async def test_search_memories_filters_below_minimum_importance(tmp_path: Path):
-    engine = MemoryEngine(
-        db_path=str(tmp_path / "memory_threshold.db"),
-        faiss_db=_FakeFaissDB(),
-        config={
-            "min_importance_for_retrieval": 0.6,
-            "search_cache_enabled": False,
-        },
-    )
-    engine.hybrid_retriever = Mock()
-    engine.hybrid_retriever.search = AsyncMock(
-        return_value=[
-            Mock(doc_id=1, metadata={"importance": 0.8}),
-            Mock(doc_id=2, metadata={"importance": 0.59}),
-            Mock(doc_id=3, metadata={}),
-        ]
-    )
-
-    results = await engine.search_memories("query", k=5)
-
-    assert [result.doc_id for result in results] == [1]
-    await asyncio.gather(*engine._pending_tasks)
-
-
-@pytest.mark.asyncio
-async def test_search_memories_zero_importance_threshold_preserves_results(
-    tmp_path: Path,
-):
-    engine = MemoryEngine(
-        db_path=str(tmp_path / "memory_no_threshold.db"),
-        faiss_db=_FakeFaissDB(),
-        config={
-            "min_importance_for_retrieval": 0.0,
-            "search_cache_enabled": False,
-        },
-    )
-    expected = [Mock(doc_id=1, metadata={"importance": 0.01})]
-    engine.hybrid_retriever = Mock()
-    engine.hybrid_retriever.search = AsyncMock(return_value=expected)
-
-    results = await engine.search_memories("query", k=5)
-
-    assert results == expected
-    await asyncio.gather(*engine._pending_tasks)
-
-
-@pytest.mark.asyncio
-async def test_search_memories_applies_vector_similarity_threshold(tmp_path: Path):
-    engine = MemoryEngine(
-        db_path=str(tmp_path / "memory_similarity.db"),
-        faiss_db=_FakeFaissDB(),
-        config={
-            "min_similarity_for_retrieval": 0.7,
-            "recent_memory_count": 0,
-            "search_cache_enabled": False,
-        },
-    )
-    keyword_only = Mock(
-        doc_id=3,
-        metadata={"importance": 0.5},
-        vector_score=None,
-        score_breakdown={},
-    )
-    engine.hybrid_retriever = Mock()
-    engine.hybrid_retriever.search = AsyncMock(
-        return_value=[
-            Mock(
-                doc_id=1,
-                metadata={"importance": 0.8},
-                vector_score=0.82,
-                score_breakdown={},
-            ),
-            Mock(
-                doc_id=2,
-                metadata={"importance": 0.8},
-                vector_score=0.69,
-                score_breakdown={},
-            ),
-            keyword_only,
-        ]
-    )
-
-    results = await engine.search_memories("query", k=5)
-
-    assert [result.doc_id for result in results] == [1, 3]
-    await asyncio.gather(*engine._pending_tasks)
-
-
-@pytest.mark.asyncio
-async def test_search_memories_event_only_keeps_legacy_and_event_types(tmp_path: Path):
-    engine = MemoryEngine(
-        db_path=str(tmp_path / "memory_types.db"),
-        faiss_db=_FakeFaissDB(),
-        config={
-            "memory_type_filter": "event_only",
-            "recent_memory_count": 0,
-            "search_cache_enabled": False,
-        },
-    )
-    engine.hybrid_retriever = Mock()
-    engine.hybrid_retriever.search = AsyncMock(
-        return_value=[
-            Mock(doc_id=1, metadata={"atom_types": ["episodic"]}),
-            Mock(doc_id=2, metadata={"atom_types": ["preference"]}),
-            Mock(doc_id=3, metadata={}),
-        ]
-    )
-
-    results = await engine.search_memories("query", k=5)
-
-    assert [result.doc_id for result in results] == [1, 3]
-    await asyncio.gather(*engine._pending_tasks)
-
-
-@pytest.mark.asyncio
-async def test_recent_memory_slots_are_reserved_without_duplicates(tmp_path: Path):
-    engine = MemoryEngine(
-        db_path=str(tmp_path / "recent_slots.db"),
-        faiss_db=_FakeFaissDB(),
-        config={"recent_memory_count": 2},
-    )
-    relevant = [Mock(doc_id=value) for value in (1, 2, 3, 4)]
-    engine._get_recent_memory_results = AsyncMock(
-        return_value=[Mock(doc_id=4), Mock(doc_id=5)]
-    )
-
-    merged = await engine._merge_recent_memories(relevant, 4, "session", "persona")
-
-    assert [result.doc_id for result in merged] == [1, 2, 4, 5]
-
-
-@pytest.mark.asyncio
 async def test_memory_engine_search_cache_reuses_results_and_invalidates_on_write(
     tmp_path: Path,
 ):
@@ -710,6 +312,10 @@ async def test_memory_engine_search_cache_reuses_results_and_invalidates_on_writ
         },
     )
     await engine.initialize()
+    # 隔离后台组件：关掉 A-MEM 演化，否则 add_memory 后的异步 variant 检索
+    # 也会调用 hybrid_retriever.search，污染本测试的 calls 计数（2026-08-23）
+    if getattr(engine, "memory_evolver", None) is not None:
+        engine.memory_evolver.enabled = False
 
     await engine.add_memory(
         content="缓存测试：用户喜欢苹果",
@@ -1374,10 +980,6 @@ async def test_batch_delete_memories_deletes_multiple(tmp_path: Path):
                     json.dumps(doc["metadata"], ensure_ascii=False),
                 ),
             )
-            await engine.save_memory_source(
-                mid,
-                [{"role": "user", "content": f"source-{mid}"}],
-            )
         await engine.db_connection.commit()
 
     deleted = await engine.batch_delete_memories(ids)
@@ -1391,13 +993,6 @@ async def test_batch_delete_memories_deletes_multiple(tmp_path: Path):
     # SQLite documents 表也应被清空
     cursor = await engine.db_connection.execute(
         f"SELECT COUNT(*) FROM documents WHERE id IN ({','.join('?' * len(ids))})",
-        ids,
-    )
-    row = await cursor.fetchone()
-    assert row[0] == 0
-
-    cursor = await engine.db_connection.execute(
-        f"SELECT COUNT(*) FROM memory_sources WHERE memory_id IN ({','.join('?' * len(ids))})",
         ids,
     )
     row = await cursor.fetchone()
@@ -1634,97 +1229,6 @@ async def test_update_memory_add_fails_returns_false(tmp_path: Path):
     await engine.close()
 
 
-@pytest.mark.asyncio
-async def test_replace_memory_rebuilds_atoms_and_preserves_create_time(tmp_path: Path):
-    engine = MemoryEngine(
-        db_path=str(tmp_path / "replace_structured.db"),
-        faiss_db=_FakeFaissDB(),
-        graph_vector_db=_FakeFaissDB(),
-        config={"atom_enabled": True, "graph_memory_enabled": True},
-    )
-    await engine.initialize()
-    old_id = await engine.add_memory(
-        content="old summary",
-        session_id="s1",
-        persona_id="p1",
-        importance=0.5,
-        metadata={"topics": ["old"], "key_facts": ["old fact"]},
-    )
-    old_memory = await engine.get_memory(old_id)
-    old_create_time = old_memory["metadata"]["create_time"]
-
-    new_id = await engine.replace_memory(
-        old_id,
-        content="new summary",
-        importance=0.8,
-        metadata={
-            "topics": ["release"],
-            "key_facts": ["Release is Friday"],
-        },
-    )
-
-    assert new_id != old_id
-    assert await engine.get_memory(old_id) is None
-    replacement = await engine.get_memory(new_id)
-    assert replacement["metadata"]["topics"] == ["release"]
-    assert replacement["metadata"]["key_facts"] == ["Release is Friday"]
-    assert replacement["metadata"]["create_time"] == old_create_time
-    atoms = await engine.atom_store.get_by_parent(new_id)
-    assert [atom.content for atom in atoms] == ["Release is Friday"]
-    assert atoms[0].entities == ["release"]
-    old_graph = await engine.graph_store.get_subgraph_for_memories([old_id])
-    new_graph = await engine.graph_store.get_subgraph_for_memories([new_id])
-    assert old_graph["entries"] == []
-    assert any(
-        "Release is Friday" in entry["content"]
-        for entry in new_graph["entries"]
-    )
-
-    await engine.close()
-
-
-@pytest.mark.asyncio
-async def test_replace_memory_cancellation_removes_new_record(tmp_path: Path):
-    engine = MemoryEngine(
-        db_path=str(tmp_path / "replace_cancelled.db"),
-        faiss_db=_FakeFaissDB(),
-        config={},
-    )
-    await engine.initialize()
-    old_id = await engine.add_memory(content="old summary", metadata={})
-    expected_new_id = old_id + 1
-    original_delete = engine.delete_memory
-    old_delete_started = asyncio.Event()
-    deleted_ids: list[int] = []
-
-    async def block_old_delete(memory_id: int) -> bool:
-        deleted_ids.append(memory_id)
-        if memory_id == old_id:
-            old_delete_started.set()
-            await asyncio.Future()
-        return await original_delete(memory_id)
-
-    engine.delete_memory = block_old_delete
-    task = asyncio.create_task(
-        engine.replace_memory(
-            old_id,
-            content="new summary",
-            metadata={"topics": ["new"], "key_facts": ["new fact"]},
-            importance=0.7,
-        )
-    )
-    await asyncio.wait_for(old_delete_started.wait(), timeout=1)
-    task.cancel()
-
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    assert deleted_ids == [old_id, expected_new_id]
-    assert await engine.get_memory(old_id) is not None
-    assert await engine.get_memory(expected_new_id) is None
-    await engine.close()
-
-
 # ==================== 分批加载测试 ====================
 
 
@@ -1838,8 +1342,8 @@ async def test_batch_delete_clears_fts_index(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_batch_delete_faiss_failure_is_marked_for_repair(tmp_path: Path):
-    """FAISS 删除失败时保留主记录，并将操作标记为可恢复。"""
+async def test_batch_delete_faiss_failure_continues(tmp_path: Path):
+    """FAISS delete 失败时不应阻断后续的 SQLite 删除。"""
     db_path = tmp_path / "batch_del_faissfail.db"
     faiss = _FakeFaissDB()
     engine = MemoryEngine(db_path=str(db_path), faiss_db=faiss, config={})
@@ -1881,109 +1385,14 @@ async def test_batch_delete_faiss_failure_is_marked_for_repair(tmp_path: Path):
 
     faiss.delete = failing_delete
 
-    with pytest.raises(RuntimeError, match="批量向量删除未找到文档"):
-        await engine.batch_delete_memories(ids)
+    deleted = await engine.batch_delete_memories(ids)
+    assert deleted == 3
 
     if engine.db_connection is not None:
         cursor = await engine.db_connection.execute(
             "SELECT COUNT(*) FROM documents WHERE id IN (?, ?, ?)", tuple(ids)
         )
         row = await cursor.fetchone()
-        assert row[0] == 3
-
-        cursor = await engine.db_connection.execute(
-            """
-            SELECT status, step FROM memory_write_ops
-            WHERE op_type = 'batch_delete'
-            ORDER BY id DESC LIMIT 1
-            """
-        )
-        op_row = await cursor.fetchone()
-        assert op_row["status"] == "needs_repair"
-        assert op_row["step"] == "batch_delete_failed"
-
-    await engine.close()
-
-
-@pytest.mark.asyncio
-async def test_concurrent_access_time_updates_do_not_lose_counts(tmp_path: Path):
-    """并发访问时间更新应原子递增 access_count，不产生丢失更新。"""
-    engine = MemoryEngine(
-        db_path=str(tmp_path / "concurrent_access.db"),
-        faiss_db=_FakeFaissDB(),
-        config={},
-    )
-    await engine.initialize()
-
-    memory_id = 1
-    await engine.db_connection.execute(
-        """
-        INSERT OR REPLACE INTO documents(id, doc_id, text, metadata, created_at, updated_at)
-        VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))
-        """,
-        (
-            memory_id,
-            "uuid-1",
-            "并发访问",
-            json.dumps({"importance": 0.5, "last_access_time": 0, "access_count": 0}),
-        ),
-    )
-    await engine.db_connection.commit()
-
-    await asyncio.gather(
-        *[engine._update_access_time_internal(memory_id) for _ in range(20)]
-    )
-
-    cursor = await engine.db_connection.execute(
-        "SELECT metadata FROM documents WHERE id = ?", (memory_id,)
-    )
-    row = await cursor.fetchone()
-    assert json.loads(row["metadata"])["access_count"] == 20
-
-    await engine.close()
-
-
-@pytest.mark.asyncio
-async def test_get_session_memories_sorted_by_create_time_desc(tmp_path: Path):
-    """get_session_memories 应按 session_id 过滤并按 create_time 降序返回。"""
-    engine = MemoryEngine(
-        db_path=str(tmp_path / "session_sort.db"),
-        faiss_db=_FakeFaissDB(),
-        config={},
-    )
-    await engine.initialize()
-
-    now = time.time()
-    for i in range(3):
-        await engine.db_connection.execute(
-            """
-            INSERT INTO documents(id, doc_id, text, metadata, created_at, updated_at)
-            VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))
-            """,
-            (
-                i + 1,
-                f"uuid-{i + 1}",
-                f"memory-{i}",
-                json.dumps({"session_id": "s1", "create_time": now + i}),
-            ),
-        )
-    await engine.db_connection.execute(
-        """
-        INSERT INTO documents(id, doc_id, text, metadata, created_at, updated_at)
-        VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))
-        """,
-        (
-            100,
-            "uuid-100",
-            "other-session",
-            json.dumps({"session_id": "s2", "create_time": now + 100}),
-        ),
-    )
-    await engine.db_connection.commit()
-
-    memories = await engine.get_session_memories("s1", limit=10)
-
-    assert [m["id"] for m in memories] == [3, 2, 1]
-    assert all(m["metadata"]["session_id"] == "s1" for m in memories)
+        assert row[0] == 0
 
     await engine.close()

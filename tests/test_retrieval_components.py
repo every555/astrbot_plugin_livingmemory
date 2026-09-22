@@ -2,13 +2,10 @@
 Tests for retrieval components (BM25/RRF/Hybrid).
 """
 
-import asyncio
 import json
 import time
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock, call
 
 import aiosqlite
 import pytest
@@ -35,35 +32,6 @@ from astrbot_plugin_livingmemory.core.retrieval.rrf_fusion import (
 )
 from astrbot_plugin_livingmemory.core.retrieval.vector_retriever import VectorRetriever
 from astrbot_plugin_livingmemory.core.utils.stopwords_manager import StopwordsManager
-
-
-@pytest.mark.asyncio
-async def test_vector_retriever_bulk_delete_saves_index_once() -> None:
-    document_storage = SimpleNamespace(
-        get_documents=AsyncMock(
-            return_value=[
-                {"id": 11, "doc_id": "uuid-11"},
-                {"id": 12, "doc_id": "uuid-12"},
-            ]
-        ),
-        delete_document_by_doc_id=AsyncMock(),
-    )
-    embedding_storage = SimpleNamespace(delete=AsyncMock())
-    retriever = VectorRetriever(
-        SimpleNamespace(
-            document_storage=document_storage,
-            embedding_storage=embedding_storage,
-        )
-    )
-
-    deleted_ids = await retriever.delete_documents([11, 12])
-
-    assert deleted_ids == [11, 12]
-    embedding_storage.delete.assert_awaited_once_with([11, 12])
-    assert document_storage.delete_document_by_doc_id.await_args_list == [
-        call("uuid-11"),
-        call("uuid-12"),
-    ]
 
 
 @pytest.mark.asyncio
@@ -634,68 +602,6 @@ def test_apply_mmr_returns_k_results():
 
 
 # ── HybridRetriever 边界条件与回滚测试 ────────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_hybrid_add_rolls_back_vector_when_bm25_raises():
-    class _Vector:
-        def __init__(self):
-            self.deleted = []
-
-        async def add_document(self, content, metadata):
-            return 17
-
-        async def delete_document(self, doc_id):
-            self.deleted.append(doc_id)
-            return True
-
-    class _BM25:
-        async def add_document(self, doc_id, content, metadata):
-            raise RuntimeError("BM25 write failed")
-
-    vector = _Vector()
-    retriever = HybridRetriever(
-        bm25_retriever=cast(BM25Retriever, _BM25()),
-        vector_retriever=cast(VectorRetriever, vector),
-        rrf_fusion=RRFFusion(k=60),
-        config={},
-    )
-
-    with pytest.raises(RuntimeError, match="BM25 write failed"):
-        await retriever.add_memory("summary", {})
-
-    assert vector.deleted == [17]
-
-
-@pytest.mark.asyncio
-async def test_hybrid_add_rolls_back_vector_when_cancelled():
-    class _Vector:
-        def __init__(self):
-            self.deleted = []
-
-        async def add_document(self, content, metadata):
-            return 18
-
-        async def delete_document(self, doc_id):
-            self.deleted.append(doc_id)
-            return True
-
-    class _BM25:
-        async def add_document(self, doc_id, content, metadata):
-            raise asyncio.CancelledError
-
-    vector = _Vector()
-    retriever = HybridRetriever(
-        bm25_retriever=cast(BM25Retriever, _BM25()),
-        vector_retriever=cast(VectorRetriever, vector),
-        rrf_fusion=RRFFusion(k=60),
-        config={},
-    )
-
-    with pytest.raises(asyncio.CancelledError):
-        await retriever.add_memory("summary", {})
-
-    assert vector.deleted == [18]
 
 
 @pytest.mark.asyncio

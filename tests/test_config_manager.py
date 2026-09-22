@@ -16,11 +16,6 @@ def test_config_manager_loads_defaults() -> None:
     assert "sparse_retriever" not in config
     assert "dense_retriever" not in config
     assert manager.get("recall_engine.top_k") == 5
-    assert manager.get("recall_engine.min_importance_for_retrieval") == 0.0
-    assert manager.get("recall_engine.min_similarity_for_retrieval") == 0.0
-    assert manager.get("recall_engine.recent_memory_count") == 2
-    assert manager.get("recall_engine.memory_type_filter") == "all"
-    assert manager.get("recall_engine.recent_context_max_age_seconds") == 7200
     assert manager.get("fusion_strategy.rrf_k") == 60
     assert manager.get("session_manager.max_sessions") == 100
     assert manager.get("session_manager.max_messages_per_session") == 1000
@@ -68,45 +63,6 @@ def test_validate_config_accepts_merged_model_shape() -> None:
 
     assert config.recall_engine.top_k == 8
     assert config.reflection_engine.summary_trigger_rounds == 4
-
-
-def test_validate_config_accepts_retrieval_importance_threshold() -> None:
-    config = validate_config(
-        {"recall_engine": {"min_importance_for_retrieval": 0.65}}
-    )
-
-    assert config.recall_engine.min_importance_for_retrieval == 0.65
-
-
-def test_validate_config_accepts_retrieval_memory_policies() -> None:
-    config = validate_config(
-        {
-            "recall_engine": {
-                "min_similarity_for_retrieval": 0.72,
-                "recent_memory_count": 3,
-                "recent_memory_max_age_hours": 48,
-                "memory_type_filter": "event_only",
-            },
-            "reflection_engine": {"include_source_time_tags": False},
-            "forgetting_agent": {"auto_archived_enabled": True},
-            "importance_decay": {"protected_importance_threshold": 0.85},
-        }
-    )
-
-    assert config.recall_engine.min_similarity_for_retrieval == 0.72
-    assert config.recall_engine.recent_memory_count == 3
-    assert config.recall_engine.memory_type_filter == "event_only"
-    assert config.reflection_engine.include_source_time_tags is False
-    assert config.forgetting_agent.auto_archived_enabled is True
-    assert config.importance_decay.protected_importance_threshold == 0.85
-
-
-def test_validate_config_accepts_recent_context_max_age() -> None:
-    config = validate_config(
-        {"recall_engine": {"recent_context_max_age_seconds": 3600}}
-    )
-
-    assert config.recall_engine.recent_context_max_age_seconds == 3600
 
 
 def test_config_manager_graph_memory_property() -> None:

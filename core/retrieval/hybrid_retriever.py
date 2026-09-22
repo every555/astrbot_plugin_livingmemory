@@ -7,7 +7,7 @@ import asyncio
 import json
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from astrbot.api import logger
@@ -15,7 +15,33 @@ from astrbot.api import logger
 from ..utils.number_utils import clamp_float, safe_float
 from .bm25_retriever import BM25Retriever
 from .rrf_fusion import BM25Result, FusedResult, RRFFusion, VectorResult
+from .emotion_router import EmotionRouter
 from .vector_retriever import VectorRetriever
+
+
+# ── 时间感知检索(wave_memory借鉴·橘子2026-09-17钦点): 查询含时间词→时间窗软聚焦 ──
+# 设计: 窗内 final_score *=1.25 / 窗外 *=0.7 (软加权非硬过滤——防"昨日记忆没存好→全空")
+import re as _re_tf
+
+TIME_FOCUS_PATTERNS = [
+    (_re_tf.compile(r'刚刚|刚才|刚说|刚问|刚才说'), 15 * 60),
+    (_re_tf.compile(r'今天|今早|今晨|早上|上午|中午|今晚'), 36 * 3600),
+    (_re_tf.compile(r'昨天|昨晚|昨夜|昨天晚上'), 2 * 86400),
+    (_re_tf.compile(r'前天'), 3 * 86400),
+    (_re_tf.compile(r'上周|上礼拜|前几天|这几天|这周'), 7 * 86400),
+    (_re_tf.compile(r'上个月|上月|前阵子|前段时间'), 31 * 86400),
+    (_re_tf.compile(r'去年|之前|以前|上次|那次|当初|那时候|老早'), 183 * 86400),
+]
+
+
+def detect_time_window(query: str) -> float:
+    """检测查询时间词,返回窗口秒数(0=无)。只扫前120字,首命中即用。"""
+    if not query:
+        return 0.0
+    for pat, sec in TIME_FOCUS_PATTERNS:
+        if pat.search(query[:120]):
+            return float(sec)
+    return 0.0
 
 
 @dataclass
@@ -30,6 +56,7 @@ class HybridResult:
     content: str
     metadata: dict[str, Any]
     score_breakdown: dict[str, float] | None = None  # 各维度分数明细
+    conflict_warnings: list = field(default_factory=list)  # P1-② 逻辑自检⚠️标注（互检+冲突关联）
 
 
 class HybridRetriever:
@@ -80,9 +107,22 @@ class HybridRetriever:
         self.score_alpha = self.config.get("score_alpha", 0.5)  # 检索相关性
         self.score_beta = self.config.get("score_beta", 0.25)  # 重要性
         self.score_gamma = self.config.get("score_gamma", 0.25)  # 时间新鲜度
+        # P1-2 重要性护盾衰减：importance 越高衰减率越低（0=关闭护盾，回到旧版统一衰减）
+        self.importance_decay_shield = self.config.get("importance_decay_shield", 0.7)
 
         # MMR 多样性参数
         self.mmr_lambda = self.config.get("mmr_lambda", 0.7)  # 相关性 vs 多样性权衡
+
+        # P0-1 Provenance: external source penalty multiplier (web/search content
+        # ranks below internal couple-chat content at equal relevance)
+        self.external_source_penalty = float(
+            self.config.get("external_source_penalty", 0.85)
+        )
+
+        # P3: 情感路由（双源检测→boost→mood调权→正向多样性）；
+        # emotion_source 由 initializer 注入 v2_engine，None 时只有词法兜底
+        self.emotion_router = EmotionRouter(self.config)
+        self.emotion_source = None
 
     async def _search_route(
         self, route_name: str, search_coro
@@ -128,16 +168,8 @@ class HybridRetriever:
         # 先添加到向量库获取doc_id
         doc_id = await self.vector_retriever.add_document(content, metadata)
 
-        # 使用相同的doc_id添加到BM25索引。BM25失败时必须清理已经
-        # 写入的向量和文档记录，否则调用方无法得知残留记录的ID。
-        try:
-            await self.bm25_retriever.add_document(doc_id, content, metadata)
-        except asyncio.CancelledError:
-            await asyncio.shield(self.vector_retriever.delete_document(doc_id))
-            raise
-        except Exception:
-            await self.vector_retriever.delete_document(doc_id)
-            raise
+        # 使用相同的doc_id添加到BM25索引
+        await self.bm25_retriever.add_document(doc_id, content, metadata)
 
         return doc_id
 
@@ -178,18 +210,58 @@ class HybridRetriever:
             ),
         )
 
-        # 2. 处理退化情况
+        # 2. 处理退化情况 — v5.5: 智能降级 + 告警
         if bm25_error and vector_error:
+            # v5.5: 全部失败 — 记录告警
+            logger.warning(
+                f"[HybridRetriever] v5.5 双索引全部失败！"
+                f"BM25错误: {type(bm25_error).__name__}: {bm25_error} | "
+                f"向量错误: {type(vector_error).__name__}: {vector_error} | "
+                f"query={query[:50]}"
+            )
             return []
 
         if bm25_error:
+            # v5.5: BM25 失败 — 告警 + 分类异常
+            err_type = type(bm25_error).__name__
+            if "corrupt" in str(bm25_error).lower() or "database" in str(bm25_error).lower():
+                logger.error(
+                    f"[HybridRetriever] v5.5 BM25索引损坏！"
+                    f"错误类型: {err_type} | 需要重建索引 | "
+                    f"详情: {bm25_error}"
+                )
+            else:
+                logger.warning(
+                    f"[HybridRetriever] v5.5 BM25检索降级为纯向量模式 | "
+                    f"错误: {err_type}: {bm25_error}"
+                )
             if self.fallback_enabled and vector_results:
                 return self._fallback_vector_only(vector_results, k)
+            logger.warning("[HybridRetriever] v5.5 BM25失败且无向量结果，返回空")
             return []
 
         if vector_error:
+            # v5.5: 向量失败 — 告警 + 分类异常
+            err_type = type(vector_error).__name__
+            if "connection" in str(vector_error).lower() or "timeout" in str(vector_error).lower():
+                logger.warning(
+                    f"[HybridRetriever] v5.5 向量服务连接异常（可能Embedding服务不可用）"
+                    f" | 错误: {err_type}: {vector_error} | "
+                    f"降级为纯BM25模式"
+                )
+            elif "dimension" in str(vector_error).lower() or "model" in str(vector_error).lower():
+                logger.error(
+                    f"[HybridRetriever] v5.5 向量模型维度不匹配！"
+                    f"可能Embedding模型已变更 | 错误: {err_type}: {vector_error}"
+                )
+            else:
+                logger.warning(
+                    f"[HybridRetriever] v5.5 向量检索降级为纯BM25模式 | "
+                    f"错误: {err_type}: {vector_error}"
+                )
             if self.fallback_enabled and bm25_results:
                 return self._fallback_bm25_only(bm25_results, k)
+            logger.warning("[HybridRetriever] v5.5 向量失败且无BM25结果，返回空")
             return []
 
         # 3. RRF融合
@@ -221,13 +293,71 @@ class HybridRetriever:
             self._apply_weighting, fused_results, current_time
         )
 
+        # 4.5 时间感知聚焦(wave借鉴): 查询含时间词→窗口内boost窗外软衰减
+        _tf_win = detect_time_window(query)
+        if _tf_win > 0 and weighted_results:
+            weighted_results = await asyncio.to_thread(
+                self._apply_time_focus, weighted_results, _tf_win, current_time
+            )
+
         # 5. MMR 去重（通过线程池卸载 O(k*n) Jaccard 集合运算）
         if len(weighted_results) > 1:
             weighted_results = await asyncio.to_thread(
                 self._apply_mmr, weighted_results, k
             )
 
+                # P3: 情感路由管线（免疫，任何异常不阻断检索主链）
+        try:
+            if (
+                self.emotion_router is not None
+                and self.emotion_router.enabled
+                and weighted_results
+            ):
+                _pid = persona_id or "default"
+                _rec = None
+                _ap = getattr(self.emotion_source, "appraisal_engine", None)
+                if _ap is not None:
+                    _rec = _ap.get_last_appraisal(_pid, max_age=600)
+                _emo, _esrc = self.emotion_router.detect_emotion_dual(query, _rec)
+                weighted_results, _ed = self.emotion_router.apply_routing(
+                    weighted_results, _emo
+                )
+                _mood_p = 0.5
+                _ec = getattr(self.emotion_source, "emotion_core", None)
+                if _ec is not None:
+                    _mood_p = float(_ec.get_snapshot(_pid).get("mood_pleasure", 0.5))
+                weighted_results = self.emotion_router.apply_mood_weight(
+                    weighted_results, _mood_p
+                )
+                weighted_results = self.emotion_router.inject_positive_diversity(
+                    weighted_results, _mood_p
+                )
+        except BaseException:
+            pass
+
         return weighted_results
+
+    @staticmethod
+    def _apply_time_focus(results: list, window_sec: float, current_time: float) -> list:
+        """时间窗软聚焦: 窗内*1.25 / 窗外*0.7, 重排序。异常免疫。"""
+        try:
+            cutoff = current_time - window_sec
+            for r in results:
+                md = r.metadata or {}
+                try:
+                    ct = float(md.get("create_time", 0) or 0)
+                    lat = float(md.get("last_access_time", 0) or 0)
+                except (TypeError, ValueError):
+                    ct, lat = 0.0, 0.0
+                ref = max(ct, lat) if (ct or lat) else current_time
+                if ref >= cutoff:
+                    r.final_score = r.final_score * 1.25
+                else:
+                    r.final_score = r.final_score * 0.85  # 窗外: 轻衰减(只奖轻罚,防窗内空货时连带空手)
+            results.sort(key=lambda x: x.final_score, reverse=True)
+        except Exception:
+            pass
+        return results
 
     def _apply_weighting(
         self, fused_results: list[FusedResult], current_time: float
@@ -282,8 +412,19 @@ class HybridRetriever:
                 )
                 metadata = {}
 
+            # Fact Superseder: 已被替代的旧版本不参与检索 (2026-08-31)
+            if str(metadata.get('status') or '').lower() in ('superseded', 'expired'):
+                continue
             # 获取重要性(默认0.5)，限制在 [0, 1]
             importance = clamp_float(metadata.get("importance"), default=0.5)
+
+            # P0-1 Provenance: external content gets a ranking penalty
+            source_origin = str(metadata.get("source") or "internal").strip().lower()
+            if source_origin not in ("internal", "external"):
+                source_origin = "internal"
+            source_penalty = (
+                self.external_source_penalty if source_origin == "external" else 1.0
+            )
 
             # 时间衰减：取 create_time 与 last_access_time 的较大值
             # 高频访问的记忆衰减更慢，符合"记忆强化"认知规律
@@ -291,7 +432,12 @@ class HybridRetriever:
             last_access_time = safe_float(metadata.get("last_access_time"), 0.0)
             reference_time = max(create_time, last_access_time)
             days_old = max(0.0, (current_time - reference_time) / 86400)
-            recency_weight = math.exp(-self.decay_rate * days_old)
+            # P1-2 重要性护盾衰减：effective_decay = decay_rate * (1 - importance * shield)
+            # importance=0.9 且 shield=0.7 时衰减率降至 37%，重要记忆比闲聊褪色慢一倍以上
+            effective_decay_rate = self.decay_rate * (
+                1.0 - importance * self.importance_decay_shield
+            )
+            recency_weight = math.exp(-effective_decay_rate * days_old)
 
             # 归一化 RRF 分数
             rrf_normalized = result.rrf_score / max_rrf
@@ -301,13 +447,16 @@ class HybridRetriever:
                 self.score_alpha * rrf_normalized
                 + self.score_beta * importance
                 + self.score_gamma * recency_weight
-            )
+            ) * source_penalty
 
             score_breakdown = {
                 "rrf_normalized": round(rrf_normalized, 4),
                 "importance": round(importance, 4),
+                "source": source_origin,
+                "source_penalty": round(source_penalty, 4),
                 "recency_weight": round(recency_weight, 4),
                 "days_old": round(days_old, 2),
+                "effective_decay_rate": round(effective_decay_rate, 6),
                 "final_score": round(final_score, 4),
             }
 

@@ -38,7 +38,6 @@ class DecayScheduler:
         db_migration: "DBMigration | None" = None,
         backup_enabled: bool = True,
         backup_keep_days: int = 7,
-        consolidation_manager=None,
     ):
         """
         初始化衰减调度器
@@ -52,7 +51,6 @@ class DecayScheduler:
             db_migration: 数据库迁移管理器（用于备份）
             backup_enabled: 是否启用每日自动备份
             backup_keep_days: 备份保留天数，超期自动删除
-            consolidation_manager: 记忆整合管理器（用于每日整合触发）
         """
         self.memory_engine = memory_engine
         self.decay_rate = decay_rate
@@ -62,7 +60,6 @@ class DecayScheduler:
         self.db_migration = db_migration
         self.backup_enabled = backup_enabled
         self.backup_keep_days = backup_keep_days
-        self.consolidation_manager = consolidation_manager
 
         self._state_file = self.data_dir / "decay_state.json"
         self._task: asyncio.Task | None = None
@@ -171,37 +168,13 @@ class DecayScheduler:
                         days_threshold=cleanup_days,
                         importance_threshold=cleanup_importance,
                     )
-                    action = (
-                        "归档"
-                        if self.memory_engine.config.get(
-                            "auto_archived_enabled", False
-                        )
-                        else "删除"
-                    )
-                    logger.info(
-                        f"[衰减调度] 自动清理完成，{action} {deleted} 条旧记忆"
-                    )
+                    logger.info(f"[衰减调度] 自动清理完成，删除 {deleted} 条旧记忆")
                 except Exception as cleanup_err:
                     logger.error(
                         f"[衰减调度] 自动清理失败: {cleanup_err}", exc_info=True
                     )
 
             await self._set_last_decay_date(self._get_today_str())
-
-            # 每日执行记忆整合
-            if self.consolidation_manager is not None:
-                try:
-                    result = await self.consolidation_manager.maybe_run("daily")
-                    if not result.get("skipped"):
-                        logger.info(
-                            f"[衰减调度] 记忆整合完成: 候选={result.get('candidates', 0)}, "
-                            f"组数={result.get('groups', 0)}, "
-                            f"合并={result.get('merged', 0)}"
-                        )
-                except Exception as consolidation_err:
-                    logger.error(
-                        f"[衰减调度] 记忆整合失败: {consolidation_err}", exc_info=True
-                    )
 
             # 每日执行备份
             if self.backup_enabled and self.db_migration:

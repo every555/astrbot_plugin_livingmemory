@@ -40,11 +40,6 @@ LivingMemory 的默认配置已经适合大多数场景。真正需要调整的�
 | `recall_engine.top_k` | `5` | 每轮自动召回的记忆数量 |
 | `recall_engine.max_k` | `10` | Agent 主动检索工具允许返回的最大数量 |
 | `recall_engine.importance_weight` | `1.0` | 重要性在最终排序中的权重 |
-| `recall_engine.min_importance_for_retrieval` | `0.0` | 最低重要性阈值，`0` 表示不过滤 |
-| `recall_engine.min_similarity_for_retrieval` | `0.0` | 最低向量相似度；纯关键词命中不受影响 |
-| `recall_engine.recent_memory_count` | `2` | 每次召回为近期记忆保留的槽位数 |
-| `recall_engine.recent_memory_max_age_hours` | `72` | 近期记忆保底的时间窗口 |
-| `recall_engine.memory_type_filter` | `all` | 设为 `event_only` 可排除明确的纯偏好/关系记忆 |
 | `recall_engine.fallback_to_vector` | `true` | 混合检索失败时降级到向量检索 |
 | `recall_engine.injection_method` | `extra_user_content` | 记忆注入到 LLM 请求的位置或形式 |
 | `recall_engine.inject_with_recent_context` | `false` | 是否拼接最近对话扩展查询 |
@@ -57,32 +52,20 @@ LivingMemory 的默认配置已经适合大多数场景。真正需要调整的�
 | 配置项 | 默认 | 说明 |
 | --- | --- | --- |
 | `filtering_settings.use_persona_filtering` | `true` | 只召回当前人格相关记忆 |
-| `filtering_settings.memory_scope_mode` | `legacy` | `legacy` 保持旧行为；也可按会话、用户或全局共享 |
-| `filtering_settings.use_session_filtering` | `true` | 仅在 `legacy` 模式下控制会话过滤 |
-| `filtering_settings.isolated_sessions` | 空 | 始终强制隔离的完整会话 ID，每行一个 |
-| `access_control.whitelist_enabled` | `false` | 仅允许名单内身份使用长期记忆 |
-| `access_control.allowed_ids` | 空 | 用户 ID、`平台:用户 ID`、群组 ID 或完整会话 ID |
-| `access_control.identity_aliases` | 空 | `来源身份=统一名称`，每行一个 |
+| `filtering_settings.use_session_filtering` | `true` | 只召回当前会话相关记忆 |
 
-`user` 模式让同一平台用户在不同群聊和私聊共享记忆；`global` 模式让所有非例外会话共享。`isolated_sessions` 的优先级最高；在 `legacy` 模式关闭会话过滤并配置例外后，非例外会话也会进入专用全局作用域，避免读取例外会话。开启白名单但名单为空会拒绝所有自动捕获、总结、召回和 Agent 记忆工具。
-
-身份别名按 `平台:用户 ID`、用户 ID、当前用户名的顺序匹配，并在对话总结前替换显示名称。作用域配置只影响升级后新写入的记忆，现有记忆不会自动迁移或重新生成向量。
+如果你希望不同群或不同私聊共享同一批长期记忆，可以关闭会话隔离；如果机器人有多个明显不同的人格，建议始终开启人格隔离。
 
 ## 总结与生命周期
 
 | 配置项 | 默认 | 说明 |
 | --- | --- | --- |
 | `reflection_engine.summary_trigger_rounds` | `10` | 达到多少轮对话后触发总结 |
-| `reflection_engine.include_source_time_tags` | `true` | 从原始消息时间写入来源日期标签 |
-| `reflection_engine.source_retention_importance_threshold` | `0.8` | 达到阈值时独立保留原始消息 |
 | `importance_decay.decay_rate` | `0.01` | 每日重要性衰减比例 |
 | `importance_decay.access_decay_window_days` | `30.0` | 访问强化的时间窗口 |
 | `importance_decay.access_decay_max_count` | `10` | 最大访问强化次数 |
-| `importance_decay.protected_importance_threshold` | `1.0` | 达到阈值的记忆不参与每日衰减 |
 
 如果你希望机器人更快记住短期上下文，可以降低 `summary_trigger_rounds`；如果希望减少 LLM 调用成本，可以提高它。
-
-保留的原文只写入 SQLite `memory_sources` 表，不进入向量、BM25、图或原子索引，因此不会增加向量数量。它会增加数据库磁盘占用。Dashboard 详情的重新总结会调用一次 LLM，并替换原记忆、重新生成 Embedding 和全部派生索引。
 
 ## Agent 主动工具
 
@@ -116,27 +99,10 @@ LivingMemory 的默认配置已经适合大多数场景。真正需要调整的�
 | `backup_settings.enabled` | `true` | 每日自动备份数据库 |
 | `backup_settings.keep_days` | `7` | 自动备份保留天数 |
 | `forgetting_agent.auto_cleanup_enabled` | `true` | 每日清理久远且低重要性记忆 |
-| `forgetting_agent.auto_archived_enabled` | `false` | 将清理候选归档并移出检索索引，而非永久删除 |
 | `forgetting_agent.cleanup_days_threshold` | `30` | 进入清理候选的天数 |
 | `forgetting_agent.cleanup_importance_threshold` | `0.3` | 清理候选的重要性阈值 |
 
-生产使用建议保持备份和迁移备份开启。启用自动归档后，原始文档仍可在 Dashboard 查看和恢复，恢复时会重新生成 Embedding 并重建 BM25、图谱和记忆原子索引。
-
-## 记忆库整合
-
-| 配置项 | 默认 | 说明 |
-| --- | --- | --- |
-| `memory_consolidation.enabled` | `false` | 是否启用记忆库定期整合 |
-| `memory_consolidation.trigger` | `daily` | 触发方式：`daily`=每日定时，`reflection`=每次反思时顺带检查 |
-| `memory_consolidation.granularity` | `session` | 聚合粒度：`session`=同一会话，`semantic`=跨会话语义聚类 |
-| `memory_consolidation.keep_original` | `archive` | 整合后旧记忆处理：`archive`=归档保留，`delete`=直接删除 |
-| `memory_consolidation.min_memories_per_group` | `3` | 每组至少多少条记忆才触发整合 |
-| `memory_consolidation.min_age_days` | `7` | 只整合创建早于该天数的记忆 |
-| `memory_consolidation.max_importance` | `0.5` | 只整合重要度低于该值的记忆 |
-| `memory_consolidation.max_groups_per_run` | `5` | 每次运行最多整合的组数 |
-| `memory_consolidation.semantic_similarity_threshold` | `0.7` | 语义聚类模式下的最小相似度 |
-
-记忆整合从源头控制记忆库规模：把零散的低价值记忆聚合、整理、总结为更精炼的一条，避免注入时硬截断带来的信息损失。整合结果写入新记忆，旧记忆按 `keep_original` 归档或删除。`trigger=reflection` 时带 6 小时冷却，不会每条消息都触发。
+生产使用建议保持备份和迁移备份开启。清理策略偏保守时，可以提高天数阈值或降低重要性阈值。
 
 ## 索引重建调优
 

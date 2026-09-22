@@ -9,11 +9,12 @@ import {
   MemoryPage,
   RecallPage,
   SystemPage,
-  PromptPage,
+  TracePage,
   esc,
   statusPill,
   nodeBadge,
 } from "./modules/index.js";
+import { GatePage } from "./modules/gate-page.js";
 
 (() => {
   "use strict";
@@ -34,7 +35,6 @@ import {
       status: "all",
       type: "all",
       sort: "created_desc",
-      selectedIds: new Set(),
     },
     selectedMemory: null,
     isEditing: false,
@@ -53,33 +53,8 @@ import {
   const memoryPage = new MemoryPage(state, api, peekPanel);
   const recallPage = new RecallPage(state, api, peekPanel);
   const systemPage = new SystemPage(state, api);
-  const promptPage = new PromptPage(state, api);
-
-  function hydrateIcons() {
-    if (!window.lucide || typeof window.lucide.createIcons !== "function") return;
-    window.lucide.createIcons({
-      attrs: {
-        "stroke-width": 1.7,
-        "aria-hidden": "true",
-      },
-    });
-  }
-
-  function initMotionField() {
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-
-    let frame = 0;
-    document.addEventListener("pointermove", (event) => {
-      if (frame) return;
-      frame = window.requestAnimationFrame(() => {
-        const x = (event.clientX / Math.max(window.innerWidth, 1) - 0.5) * 12;
-        const y = (event.clientY / Math.max(window.innerHeight, 1) - 0.5) * 12;
-        document.documentElement.style.setProperty("--field-x", x.toFixed(2) + "px");
-        document.documentElement.style.setProperty("--field-y", y.toFixed(2) + "px");
-        frame = 0;
-      });
-    }, { passive: true });
-  }
+  const tracePage = new TracePage(state, api);
+  const gatePage = new GatePage(state, api);
 
   /* ================================================================
      Theme Management
@@ -163,7 +138,8 @@ import {
     if (name === "memory") memoryPage.fetch();
     if (name === "recall") { /* 召回页面按需加载 */ }
     if (name === "system") systemPage.fetch();
-    if (name === "prompts") promptPage.fetch();
+    if (name === "trace") tracePage.fetch();
+    if (name === "gate") gatePage.fetch();
   }
 
   function normalizeLocale(locale) {
@@ -245,9 +221,8 @@ import {
     if (state.page === "system" && state._systemCache) {
       systemPage.render(state._systemCache.data);
     }
-    if (state.page === "prompts" && promptPage.prompts.length) {
-      promptPage.render();
-      promptPage.refreshEditorTitle();
+    if (state.page === "trace" && state._traceCache) {
+      tracePage.renderList(state._traceCache.traces || []);
     }
 
     const peekPanelEl = document.getElementById("peek-panel");
@@ -284,8 +259,6 @@ import {
      Initialization
      ================================================================ */
   async function init() {
-    hydrateIcons();
-    initMotionField();
     const context = await api.ready();
 
     if (api.bridge && typeof api.bridge.onContext === "function") {
@@ -311,7 +284,8 @@ import {
 
     memoryPage.initEventListeners();
     recallPage.initEventListeners();
-    systemPage.initEventListeners();
+    tracePage.initEventListeners();
+    gatePage.bindGlobalEvents();
 
     document.getElementById("peek-close").addEventListener("click", () => peekPanel.close());
     document.getElementById("peek-overlay").addEventListener("click", () => peekPanel.close());
@@ -347,7 +321,6 @@ import {
   window.lmEsc = esc;
   window.lmStatusPill = statusPill;
   window.lmNodeBadge = nodeBadge;
-  window.lmHydrateIcons = hydrateIcons;
 
   // 图谱小视图绘制函数（如果需要）
   window.lmDrawMiniGraph = (canvas, nodes, edges) => {
